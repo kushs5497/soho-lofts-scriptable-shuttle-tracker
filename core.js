@@ -150,7 +150,7 @@ function mapUI(){
      row.appendChild(dot);row.appendChild(label);row.appendChild(times);card.appendChild(row);
    });
    const note=document.createElement("div");note.className="path-note";card.appendChild(note);
-   const popupObj=new maplibregl.Popup({offset:20,maxWidth:"345px",closeOnClick:true})
+   const popupObj=new maplibregl.Popup({offset:20,maxWidth:"345px",closeOnClick:false})
      .setLngLat(feature.geometry.coordinates).setDOMContent(card).addTo(map);
    pathPopup=popupObj;
    popupObj.on("close",()=>{
