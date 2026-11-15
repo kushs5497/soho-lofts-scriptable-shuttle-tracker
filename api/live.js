@@ -6,6 +6,29 @@
 const AUTH_URL="https://fim.api.us.fleetmatics.com/token";
 const PLOTS_URL="https://reveal.us.vzconnect.com/plot/Plot/GetVehiclePlotsForUserWithMetadata";
 const PATH_URL="https://panynj-path-af-tb.azurewebsites.net/api/tokenrequest?TKrTIgWSdgikIrqvftckyOh";
+// The public map gets the same real branding images used by the iOS Scriptable map.
+// Proxying them as data URIs keeps canvas icons usable without cross-origin taint.
+const SOHO_LOGO="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTkBtP0Tuh9VG-ATuApuApK_5mtOFCwTeisS-y7xZoKZA&s";
+const PATH_LOGO="https://upload.wikimedia.org/wikipedia/commons/f/f3/PATH_logo.svg";
+let brandingCache=null;
+async function loadBranding(){
+  if(brandingCache&&Date.now()-brandingCache.at<86400000)return {logos:brandingCache.logos};
+  const logos=await Promise.all([SOHO_LOGO,PATH_LOGO].map(async url=>{
+    const control=new AbortController(),timer=setTimeout(()=>control.abort(),9000);
+    try{
+      const response=await fetch(url,{signal:control.signal,headers:{Accept:"image/*"},cache:"force-cache"});
+      if(!response.ok)throw Error("Branding HTTP "+response.status);
+      const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
+      if(!["image/svg+xml","image/png","image/jpeg","image/webp"].includes(type))
+        throw Error("Unexpected logo content type");
+      const bytes=Buffer.from(await response.arrayBuffer());
+      if(bytes.length>160000)throw Error("Logo exceeds safe size");
+      return "data:"+type+";base64,"+bytes.toString("base64");
+    }finally{clearTimeout(timer)}
+  }));
+  brandingCache={logos,at:Date.now()};
+  return {logos};
+}
 let vehicleToken=null;
 let gpsCache=null;
 let gpsCachedAt=0;
@@ -115,9 +138,10 @@ module.exports=async function handler(req,res){
   res.setHeader("Allow","GET");
   if(req.method!=="GET")return json(res,405,{error:"Method not allowed"});
   const kind=String(req.query.kind||"");
-  if(kind!=="gps"&&kind!=="path")return json(res,400,{error:"Unknown live data type"});
+  if(kind!=="gps"&&kind!=="path"&&kind!=="logos")return json(res,400,{error:"Unknown live data type"});
   try{
     if(kind==="gps")return json(res,200,await loadGPS());
+    if(kind==="logos")return json(res,200,await loadBranding());
     const station=String(req.query.station||"");
     const direction=String(req.query.direction||"");
     return json(res,200,await pathConnection(station,direction));
