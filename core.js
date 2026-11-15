@@ -454,6 +454,107 @@ const PATH_DEST={
       {id:"JSQ",name:"Journal Square"},{id:"HOB",name:"Hoboken"}]
 };
 let pathOfficialCache=null,pathOfficialCachedAt=0,pathAltCooldownUntil=0;
+// Experimental RidePATH SignalR client. No app credential is stored in GitHub.
+const PATH_SIGNALR_KEY="soho-path-signalr-app-token-v1";
+const PATH_SIGNALR_ENDPOINT="https://panynj-path-af-tb.azurewebsites.net/api/tokenrequest?TKrTIgWSdgikIrqvftckyOh";
+const PATH_SIGNALR_LISTEN_MS=13000;
+async function pathSignalRSetup(){
+ if(Keychain.contains(PATH_SIGNALR_KEY))return;
+ const alert=new Alert();
+ alert.title="SignalR test credential";
+ alert.message="Enter the RidePATH app bearer token once. It remains in this iPhone's Scriptable Keychain, not GitHub. Cancel uses the existing PATH feeds.";
+ alert.addSecureTextField("RidePATH app bearer token");
+ alert.addAction("Save on iPhone");
+ alert.addCancelAction("Use existing feed");
+ if(await alert.presentAlert()<0)return;
+ const value=alert.textFieldValue(0).trim().replace(/^Bearer\s+/i,"");
+ if(value)Keychain.set(PATH_SIGNALR_KEY,value);
+}
+async function pathSignalRPost(url,body,headers){
+ const req=new Request(url);
+ req.method="POST";
+ req.timeoutInterval=12;
+ req.headers=headers;
+ req.body=body;
+ const raw=await req.loadString();
+ const status=req.response&&req.response.statusCode;
+ if(status===204||status>=400)throw Error("SignalR HTTP "+status);
+ return JSON.parse(raw);
+}
+async function pathSignalRConnectParams(code,direction){
+ const credential=Keychain.get(PATH_SIGNALR_KEY);
+ const station=code==="HOB"?"Hoboken":"Newport";
+ const auth=await pathSignalRPost(PATH_SIGNALR_ENDPOINT,
+   JSON.stringify({station,direction}),
+   {Authorization:"Bearer "+credential,AppName:"RidePATH",AppVersion:"6.2.2","Content-Type":"application/json"});
+ if(!auth||!auth.Url||!auth.AccessToken)throw Error("SignalR token missing");
+ const base=String(auth.Url);
+ const negotiate=base.replace(/^https?:/,"https:").replace(/\/client\/?/,"/client/negotiate");
+ const separator=negotiate.includes("?")?"&":"?";
+ const info=await pathSignalRPost(negotiate+separator+"negotiateVersion=1","",
+   {Authorization:"Bearer "+auth.AccessToken});
+ if(!info||!info.connectionToken)throw Error("SignalR negotiation missing connectionToken");
+ const wsUrl=base.replace(/^https?:/,"wss:");
+ const sep=wsUrl.includes("?")?"&":"?";
+ return {code,direction,expected:(direction==="New York"?"ToNY":"ToNJ")+","+code,
+   url:wsUrl+sep+"id="+encodeURIComponent(info.connectionToken)+"&access_token="+encodeURIComponent(auth.AccessToken)};
+}
+async function pathSignalRArrivals(station,web){
+ if(!web||!Keychain.contains(PATH_SIGNALR_KEY))throw Error("SignalR unconfigured");
+ const code=PATH_CODES[station];
+ const dirs=code==="HOB"?["New York"]:["New York","New Jersey"];
+ // Acquire tokens and negotiate independent streams concurrently.
+ const settled=await Promise.allSettled(dirs.map(d=>pathSignalRConnectParams(code,d)));
+ const connections=settled.filter(x=>x.status==="fulfilled").map(x=>x.value);
+ if(!connections.length)throw Error("No SignalR negotiation succeeded: "+
+   settled.map(x=>String(x.reason)).join("; "));
+ // Browser WebSocket cannot set Authorization headers. Azure SignalR supports
+ // access_token in the query for WebSocket browser clients.
+ const browserCode="(function(){"+
+   "const feeds="+JSON.stringify(connections)+";"+
+   "const limit="+PATH_SIGNALR_LISTEN_MS+";"+
+   "function one(feed){return new Promise(resolve=>{let done=false;let sock=null;"+
+   "const finish=(value)=>{if(done)return;done=true;clearTimeout(timeout);"+
+   "try{if(sock)sock.close();}catch(_){}resolve(value);};"+
+   "const timeout=setTimeout(()=>finish({error:'timeout',feed:feed.expected}),limit);"+
+   "try{sock=new WebSocket(feed.url);}catch(e){finish({error:String(e),feed:feed.expected});return;}"+
+   "sock.onopen=()=>sock.send(JSON.stringify({protocol:'json',version:1})+String.fromCharCode(30));"+
+   "sock.onerror=()=>finish({error:'websocket error',feed:feed.expected});"+
+   "sock.onclose=()=>finish({error:'websocket closed',feed:feed.expected});"+
+   "sock.onmessage=(event)=>{if(typeof event.data!=='string')return;"+
+   "for(const part of event.data.split(String.fromCharCode(30))){if(!part)continue;"+
+   "try{const msg=JSON.parse(part);if(msg.target!=='SendMessage')continue;"+
+   "const a=msg.arguments||[];if(a.length<2||!String(a[0]).endsWith(','+feed.expected))continue;"+
+   "const p=typeof a[1]==='string'?JSON.parse(a[1]):a[1];"+
+   "if(!p||p.target!==feed.code||!Array.isArray(p.messages))continue;"+
+   "finish({feed:feed.expected,payload:p});return;}catch(_){}"+
+   "}};});}"+
+   "Promise.all(feeds.map(one)).then(result=>completion(result)).catch(err=>completion([{error:String(err)}]));"+
+   "})()";
+ const snapshots=await web.evaluateJavaScript(browserCode,true);
+ if(!Array.isArray(snapshots))throw Error("Invalid SignalR WebView response");
+ const rows=pathBuildRows(code),now=Date.now();
+ let latest=0,streams=0;
+ for(const snap of snapshots){
+   if(!snap||!snap.payload)continue;
+   streams++;
+   for(const train of snap.payload.messages){
+     if(!train)continue;
+     const updated=Date.parse(String(train.lastUpdated||""));
+     const seconds=Number(train.secondsToArrival);
+     if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000||
+       !Number.isFinite(seconds)||seconds<0||seconds>7200)continue;
+     latest=Math.max(latest,updated);
+     pathSetSoonest(rows,train.headSign,updated+seconds*1000,now,train.lineColor,train.route);
+   }
+ }
+ if(!streams||!rows.some(x=>x.times.length)){
+   const errors=snapshots.map(x=>x.error||"no usable arrivals").join("; ");
+   throw Error("SignalR no usable trains: "+errors);
+ }
+ return pathResult(code,rows,"RidePATH SignalR",latest);
+}
+
 function pathDestination(text){
  const s=String(text||"").trim().toLowerCase();
  if(/^33(?:rd)?(?:\s*(?:st|street))?\b/.test(s))return "33S";
@@ -559,14 +660,19 @@ async function pathAlternative(station,code){
    throw e;
  }
 }
-async function fetchArrivals(station){
+async function fetchArrivals(station,web){
  const code=PATH_CODES[station];
  if(!code)throw Error("Unknown PATH station");
- try{return await pathOfficial(code);}
- catch(officialError){
-   try{return await pathAlternative(station,code);}
-   catch(alternativeError){
-     throw Error("No current train predictions from either source");
+ // SignalR is experimental; preserve the existing proven feed as fallback.
+ try{return await pathSignalRArrivals(station,web);}
+ catch(signalrError){
+   console.warn("SignalR fallback ("+station+"): "+signalrError);
+   try{return await pathOfficial(code);}
+   catch(officialError){
+     try{return await pathAlternative(station,code);}
+     catch(alternativeError){
+       throw Error("SignalR and both existing PATH sources unavailable");
+     }
    }
  }
 }
@@ -577,7 +683,7 @@ async function fetchArrivals(station){
 async function getAppVersion(){
  const valid=v=>typeof v==="string"&&/^[0-9]+[.][0-9]+[.][0-9]+$/.test(v);
  try{
-   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/main/version.json?t="+Date.now());
+   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/SignalR/version.json?t="+Date.now());
    req.timeoutInterval=6;
    req.headers={"Cache-Control":"no-cache",Accept:"application/json"};
    const raw=await req.loadString();
@@ -588,7 +694,7 @@ async function getAppVersion(){
  }catch(e){console.warn("Version manifest unavailable: "+e);}
  try{
    const fm=FileManager.local();
-   const path=fm.joinPath(fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime"),"update-state.json");
+   const path=fm.joinPath(fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime-SignalR"),"update-state.json");
    if(fm.fileExists(path)){
      const state=JSON.parse(fm.readString(path));
      if(state&&valid(state.version))return state.version;
@@ -598,6 +704,7 @@ async function getAppVersion(){
 }
 async function showMap(){
  const versionPromise=getAppVersion();
+ await pathSignalRSetup();
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,version:await versionPromise};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
@@ -616,7 +723,7 @@ async function showMap(){
    if(!q||!["hoboken","newport"].includes(q.station))return;
    pathBusy=true;
    try{
-     const data=await fetchArrivals(q.station);
+     const data=await fetchArrivals(q.station,web);
      if(!stop)await web.evaluateJavaScript("window.receivePathStationData && window.receivePathStationData("+JSON.stringify({id:q.id,station:q.station,result:data})+")",false);
    }catch(e){
      if(!stop)try{
