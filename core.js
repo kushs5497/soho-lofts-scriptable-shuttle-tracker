@@ -97,8 +97,8 @@ async function gps(creds){
 }
 async function imageData(url,svg){try{const r=new Request(url);r.timeoutInterval=10;if(svg){const x=await r.loadString();return "data:image/svg+xml;base64,"+Data.fromString(x).toBase64String();}return "data:image/png;base64,"+Data.fromPNG(await r.loadImage()).toBase64String();}catch(_){return null;}}
 function mapUI(){
-  // v17.2: styled DOM pins, anchored with MapLibre's own project() coordinates.
-  // This deliberately avoids MapLibre Marker transforms and native icon layers.
+  // v17.3: MapLibre's official DOM Marker implementation owns geographic
+  // alignment. Its root transform is NEVER overridden by our CSS.
   const D=window.DATA;
   const map=new maplibregl.Map({
     container:"map",
@@ -107,65 +107,49 @@ function mapUI(){
     zoom:14.7,
     attributionControl:false
   });
-  let ready=false,last=null,first=true,selected="soho",userMoved=false;
+  let ready=false,first=true,selected="soho",userMoved=false,last=null;
+  const busMarkers=new Map();
+  const stationMarkers=new Map();
+  let labelsQueued=false;
+  let diagnosticsOpen=false;
 
-  // iOS 26 / Scriptable sometimes reports a layout viewport about
-  // 125 points shorter than the actual display during WebView.present().
-  // Size the body to the physical CSS screen height when larger, and
-  // position the map + controls inside that shared coordinate space.
-  function syncScreenHeight(){
-    const viewport=window.visualViewport;
-    const candidates=[
-      window.innerHeight||0,
-      document.documentElement.clientHeight||0,
-      window.screen?window.screen.height:0,
-      viewport?(viewport.height+Math.max(0,viewport.offsetTop)):0
-    ].filter(n=>Number.isFinite(n)&&n>0);
-    const height=Math.ceil(Math.max.apply(null,candidates));
-    if(height>0&&Math.abs(document.body.getBoundingClientRect().height-height)>1){
-      document.body.style.height=height+"px";
-    }
-    map.resize();
-    syncPoints();
-    return {
-      screenHeight:window.screen?window.screen.height:null,
-      innerHeight:window.innerHeight,
-      bodyHeight:document.body.getBoundingClientRect().height,
-      mapHeight:map.getContainer().clientHeight,
-      canvasHeight:map.getCanvas().clientHeight
-    };
+  function create(tag,className,parent,text){
+    const el=document.createElement(tag);
+    if(className)el.className=className;
+    if(text!==undefined)el.textContent=String(text);
+    if(parent)parent.appendChild(el);
+    return el;
   }
-  window.shuttleSyncViewport=syncScreenHeight;
-  const stopPins=new Map(),busPins=new Map(),allPoints=new Set();
-
-  function node(tag,className,parent,text){
-    const e=document.createElement(tag);
-    if(className)e.className=className;
-    if(text!==undefined)e.textContent=String(text);
-    if(parent)parent.appendChild(e);
-    return e;
-  }
-  function safe(s){
-    return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
-      .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+  function safe(v){
+    return String(v==null?"":v)
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;")
+      .replace(/'/g,"&#39;");
   }
   function fit(duration){
-    const b=new maplibregl.LngLatBounds();
-    [D.soho,D.hob,D.npt].forEach(p=>b.extend(p));
-    if(last)last.vehicles.forEach(v=>b.extend([v.lon,v.lat]));
-    map.fitBounds(b,{padding:{top:145,bottom:230,left:55,right:55},maxZoom:15.5,duration:duration});
+    const bounds=new maplibregl.LngLatBounds();
+    [D.soho,D.hob,D.npt].forEach(p=>bounds.extend(p));
+    if(last)last.vehicles.forEach(v=>bounds.extend([v.lon,v.lat]));
+    map.fitBounds(bounds,{
+      padding:{top:145,bottom:230,left:55,right:55},
+      maxZoom:15.5,
+      duration
+    });
   }
   function refresh(){
-    document.getElementById("title").textContent=({
+    document.getElementById("title").textContent={
       soho:"SoHo Lofts",hoboken:"Hoboken PATH",newport:"Newport PATH"
-    })[selected];
-    document.querySelectorAll("#tabs button").forEach(b=>b.className=b.dataset.stop===selected?"active":"");
-    const el=document.getElementById("departures");el.textContent="";
-    if(D.sunday){el.textContent="Call concierge for shuttle · 10 AM–6 PM";return;}
-    const rows=D.events.filter(e=>e.origin===selected&&e.at>=Date.now()).slice(0,2);
-    if(!rows.length){el.textContent="No more departures here today";return;}
-    rows.forEach(e=>{
-      const row=node("div","departure",el);
+    }[selected];
+    document.querySelectorAll("#tabs button").forEach(b=>{
+      b.className=b.dataset.stop===selected?"active":"";
+    });
+    const list=document.getElementById("departures");
+    list.textContent="";
+    if(D.sunday){list.textContent="Call concierge for shuttle · 10 AM–6 PM";return;}
+    const upcoming=D.events.filter(e=>e.origin===selected&&e.at>=Date.now()).slice(0,2);
+    if(!upcoming.length){list.textContent="No more departures here today";return;}
+    upcoming.forEach(e=>{
+      const row=create("div","departure",list);
       const destination=e.dest==="soho"?"SoHo Lofts":e.dest==="newport"?"Newport PATH":"Hoboken PATH";
       row.textContent=e.label+" · Shuttle "+e.bus+" → "+destination;
     });
@@ -185,7 +169,8 @@ function mapUI(){
     const dotnet=/^\/Date\((\d+)/.exec(t);
     if(dotnet)return Number(dotnet[1]);
     if(t.indexOf("T")<0||!/(Z|[+-]\d\d:?\d\d)$/.test(t))return null;
-    const parsed=Date.parse(t);return Number.isFinite(parsed)?parsed:null;
+    const parsed=Date.parse(t);
+    return Number.isFinite(parsed)?parsed:null;
   }
   function moving(v){
     const status=String(v.iconClass||v.status||"").toLowerCase();
@@ -195,150 +180,109 @@ function mapUI(){
       v.speed!=null&&Number.isFinite(v.speed)&&v.speed>2&&
       v.heading!=null&&Number.isFinite(v.heading);
   }
-
-  // CSS pixel positions live in MapLibre's canvas coordinate system,
-  // NOT device pixels or tile/world pixels. The root gets no CSS transform.
-  let overlay;
-  function makePoint(coords){
-    const root=node("div","geo-point",overlay);
-    root.style.left="0px";root.style.top="0px";
-    const point={root,coords};
-    allPoints.add(point);position(point);
-    return point;
+  function addStation(id,title,coords,logo,fallback){
+    // Keep marker root 38x50; MapLibre places its bottom center at coords.
+    const root=create("div","shuttle-dom-poi");
+    const visual=create("div","poi-visual",root);
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute("viewBox","0 0 60 78");
+    svg.setAttribute("class","poi-shape");
+    svg.setAttribute("aria-hidden","true");
+    const path=document.createElementNS("http://www.w3.org/2000/svg","path");
+    path.setAttribute("d","M30 1 C13 1 1 14 1 30 C1 49 18 68 30 78 C42 68 59 49 59 30 C59 14 47 1 30 1 Z");
+    path.setAttribute("fill","#ffffff");
+    svg.appendChild(path);
+    visual.appendChild(svg);
+    const logoShell=create("div","poi-logo",visual);
+    if(logo){
+      const img=create("img","",logoShell);
+      img.src=logo;
+      img.alt=title;
+      img.onerror=function(){
+        logoShell.textContent=fallback;
+        logoShell.classList.add("poi-logo-fallback");
+      };
+    }else{
+      logoShell.textContent=fallback;
+      logoShell.classList.add("poi-logo-fallback");
+    }
+    create("div","poi-label",visual,title);
+    root.addEventListener("click",function(e){
+      e.stopPropagation();
+      selected=id;
+      refresh();
+    });
+    const marker=new maplibregl.Marker({
+      element:root,anchor:"bottom",offset:[0,0],subpixelPositioning:true
+    }).setLngLat(coords).addTo(map);
+    stationMarkers.set(id,marker);
   }
-  function position(point){
-    const projected=map.project(point.coords);
-    point.screenX=projected.x;
-    point.screenY=projected.y;
-    point.root.style.left=projected.x+"px";
-    point.root.style.top=projected.y+"px";
-    // Hide distant pins so they cannot appear over the status/panel.
-    const wide=map.getContainer().clientWidth;
-    const high=map.getContainer().clientHeight;
-    point.root.style.visibility=
-      projected.x < -120 || projected.y < -120 ||
-      projected.x > wide+120 || projected.y > high+120
-      ? "hidden" : "visible";
+  function addVehicle(v){
+    // Root has an actual 25px box; custom CSS styles ONLY descendants.
+    const root=create("div","shuttle-dom-bus");
+    const visual=create("div","bus-visual",root);
+    const rotor=create("div","bus-rotor",visual);
+    create("div","bus-arrow",rotor);
+    const badge=create("div","bus-badge",visual);
+    const label=create("div","bus-label",visual);
+    const marker=new maplibregl.Marker({
+      element:root,anchor:"center",offset:[0,0],subpixelPositioning:true
+    }).setLngLat([v.lon,v.lat]).addTo(map);
+    const info={marker,root,rotor,badge,label,vehicle:v};
+    root.addEventListener("click",function(e){
+      e.stopPropagation();
+      const current=info.vehicle;
+      new maplibregl.Popup({offset:22,maxWidth:"300px"})
+        .setLngLat([current.lon,current.lat])
+        .setHTML(popup(current))
+        .addTo(map);
+    });
+    busMarkers.set(v.id,info);
+    return info;
   }
-  function syncPoints(){
-    if(!overlay)return;
-    allPoints.forEach(position);
-    arrangeBusLabels();
+  function updateVehicle(v){
+    let info=busMarkers.get(v.id);
+    if(!info)info=addVehicle(v);
+    info.vehicle=v;
+    info.marker.setLngLat([v.lon,v.lat]);
+    const number=["1","2","3"].includes(String(v.number))?String(v.number):"unknown";
+    const color=D.colors[number]||D.colors.unknown;
+    info.badge.style.backgroundColor=color;
+    info.badge.textContent=number==="unknown"?"?":number;
+    info.label.textContent=v.name||("Shuttle "+number);
+    info.rotor.style.setProperty("--bus-color",color);
+    info.rotor.style.display=moving(v)?"block":"none";
+    info.rotor.style.transform=
+      "translate(-50%,-50%) rotate("+(v.heading==null?0:v.heading)+"deg)";
   }
-
-  // The old design used full white name badges.
-  // When buses idle together, lift the badges to separate rows instead
-  // of allowing all three to overlap. Pin centers never move.
   function arrangeBusLabels(){
+    labelsQueued=false;
     const placed=[];
-    const buses=Array.from(busPins.values())
-      .filter(pt=>pt.label&&pt.vehicle&&pt.root.style.visibility!=="hidden")
+    const visible=Array.from(busMarkers.values())
+      .filter(info=>info.root.isConnected)
       .sort((a,b)=>{
         const na=Number(a.vehicle.number),nb=Number(b.vehicle.number);
         return (Number.isFinite(na)?na:99)-(Number.isFinite(nb)?nb:99);
       });
-
-    for(const pt of buses){
-      const w=pt.label.offsetWidth||100;
-      const h=pt.label.offsetHeight||30;
-      let bottom=32,tries=0;
-      while(tries++<8){
-        const rectangle={
-          l:pt.screenX-w/2,
-          r:pt.screenX+w/2,
-          b:pt.screenY+12.5-bottom,
-          t:pt.screenY+12.5-bottom-h
-        };
-        const overlaps=placed.some(prev=>
-          rectangle.l<prev.r+6&&rectangle.r>prev.l-6&&
-          rectangle.t<prev.b+5&&rectangle.b>prev.t-5
+    for(const info of visible){
+      const label=info.label;
+      let bottom=32;
+      for(let attempts=0;attempts<8;attempts++){
+        label.style.bottom=bottom+"px";
+        const r=label.getBoundingClientRect();
+        const collision=placed.some(p=>
+          r.left<p.right+5&&r.right>p.left-5&&
+          r.top<p.bottom+5&&r.bottom>p.top-5
         );
-        if(!overlaps){
-          placed.push(rectangle);
-          break;
-        }
-        bottom+=h+7;
+        if(!collision){placed.push(r);break;}
+        bottom+=r.height+7;
       }
-      pt.label.style.bottom=bottom+"px";
     }
   }
-  function removePoint(point){
-    if(!point)return;
-    allPoints.delete(point);
-    point.root.remove();
-  }
-
-  function addStop(id,name,coords,logo,label){
-    const pt=makePoint(coords);
-    const visual=node("div","poi-visual",pt.root);
-    visual.style.width="38px";visual.style.height="50px";
-    const shape=document.createElementNS("http://www.w3.org/2000/svg","svg");
-    shape.setAttribute("viewBox","0 0 60 78");
-    shape.setAttribute("class","poi-shape");
-    shape.setAttribute("aria-hidden","true");
-    const path=document.createElementNS("http://www.w3.org/2000/svg","path");
-    path.setAttribute("d","M30 1 C13 1 1 14 1 30 C1 49 18 68 30 78 C42 68 59 49 59 30 C59 14 47 1 30 1 Z");
-    path.setAttribute("fill","#fff");
-    shape.appendChild(path);
-    visual.appendChild(shape);
-
-    const logoShell=node("div","poi-logo",visual);
-    if(logo){
-      const image=node("img","",logoShell);
-      image.src=logo;image.alt=name;
-      image.onerror=function(){
-        logoShell.textContent=label;
-        logoShell.classList.add("poi-logo-fallback");
-      };
-    }else{
-      logoShell.textContent=label;
-      logoShell.classList.add("poi-logo-fallback");
-    }
-    node("div","poi-label",visual,name);
-    visual.addEventListener("click",function(event){
-      event.stopPropagation();
-      selected=id;refresh();
-    });
-    stopPins.set(id,pt);
-  }
-
-  function addBus(v){
-    const pt=makePoint([v.lon,v.lat]);
-    const visual=node("div","bus-visual",pt.root);
-    const rotor=node("div","bus-rotor",visual);
-    node("div","bus-arrow",rotor);
-    const badge=node("div","bus-badge",visual);
-    const nameLabel=node("div","bus-label",visual);
-    visual.addEventListener("click",function(event){
-      event.stopPropagation();
-      if(!pt.vehicle)return;
-      new maplibregl.Popup({offset:22,maxWidth:"300px"})
-        .setLngLat([pt.vehicle.lon,pt.vehicle.lat])
-        .setHTML(popup(pt.vehicle))
-        .addTo(map);
-    });
-    pt.rotor=rotor;
-    pt.badge=badge;
-    pt.label=nameLabel;
-    busPins.set(v.id,pt);
-    return pt;
-  }
-  function updateBus(v){
-    let pt=busPins.get(v.id);
-    if(!pt)pt=addBus(v);
-    pt.vehicle=v;
-    pt.coords=[v.lon,v.lat];
-    const n=["1","2","3"].includes(String(v.number))?String(v.number):"unknown";
-    const color=D.colors[n]||D.colors.unknown;
-    pt.badge.style.backgroundColor=color;
-    pt.badge.textContent=n==="unknown"?"?":n;
-    pt.label.textContent=v.name||("Shuttle "+n);
-    pt.rotor.style.setProperty("--bus-color",color);
-    pt.rotor.style.display=moving(v)?"block":"none";
-    // The arrow turns, while the badge and its number remain upright.
-    pt.rotor.style.transform="translate(-50%, -50%) rotate("+
-      (v.heading==null?0:v.heading)+"deg)";
-    position(pt);
+  function queueLabels(){
+    if(labelsQueued)return;
+    labelsQueued=true;
+    requestAnimationFrame(arrangeBusLabels);
   }
 
   window.receiveVehicleData=function(snapshot){
@@ -347,12 +291,12 @@ function mapUI(){
     const seen=new Set();
     snapshot.vehicles.forEach(v=>{
       seen.add(v.id);
-      updateBus(v);
+      updateVehicle(v);
     });
-    for(const [id,pt] of busPins){
+    for(const [id,info] of busMarkers){
       if(!seen.has(id)){
-        removePoint(pt);
-        busPins.delete(id);
+        info.marker.remove();
+        busMarkers.delete(id);
       }
     }
     document.getElementById("gps").textContent=
@@ -360,7 +304,7 @@ function mapUI(){
       " · Synced "+new Date(snapshot.at).toLocaleTimeString([],{
         hour:"numeric",minute:"2-digit",second:"2-digit"
       });
-    syncPoints();
+    queueLabels();
     if(first){
       first=false;
       if(!userMoved)fit(0);
@@ -372,42 +316,75 @@ function mapUI(){
     return true;
   };
 
+  // Diagnostic: tap the "vehicles · Synced" text to see the values
+  // that iOS provides to the embedded WebView. No personal location.
+  function viewportDetails(){
+    const visual=window.visualViewport;
+    const rect=map.getContainer().getBoundingClientRect();
+    return [
+      "Layout / Screen (CSS points)",
+      "innerHeight: "+window.innerHeight,
+      "screen.height: "+window.screen.height,
+      "screen.availHeight: "+window.screen.availHeight,
+      "document.clientHeight: "+document.documentElement.clientHeight,
+      "visualViewport.height: "+(visual?visual.height:"N/A"),
+      "visualViewport.offsetTop: "+(visual?visual.offsetTop:"N/A"),
+      "body.height: "+Math.round(document.body.getBoundingClientRect().height),
+      "map.height: "+Math.round(rect.height),
+      "canvas.height: "+Math.round(map.getCanvas().getBoundingClientRect().height),
+      "devicePixelRatio: "+window.devicePixelRatio,
+      "v17.3.0"
+    ].join("\n");
+  }
+  function toggleDiagnostics(){
+    let pane=document.getElementById("viewport-debug");
+    if(!pane){
+      pane=create("div","viewport-debug",document.body);
+    }
+    diagnosticsOpen=!diagnosticsOpen;
+    if(diagnosticsOpen){
+      pane.textContent=viewportDetails();
+      pane.style.display="block";
+    }else{
+      pane.style.display="none";
+    }
+  }
+  window.shuttleViewportDebug=viewportDetails;
+
   map.on("load",function(){
     try{
-      // Attach the overlay to the whole map root, not the internal
-      // canvas container, which can clip its children in iOS WebViews.
-      // map.project returns map-root-relative CSS pixels.
-      overlay=node("div","geo-overlay",map.getContainer());
-      addStop("soho","SoHo Lofts",D.soho,D.logos[0],"SoHo");
-      addStop("hoboken","Hoboken PATH",D.hob,D.logos[1],"PATH");
-      addStop("newport","Newport PATH",D.npt,D.logos[1],"PATH");
+      addStation("soho","SoHo Lofts",D.soho,D.logos[0],"SoHo");
+      addStation("hoboken","Hoboken PATH",D.hob,D.logos[1],"PATH");
+      addStation("newport","Newport PATH",D.npt,D.logos[1],"PATH");
       document.querySelectorAll("#tabs button").forEach(b=>{
         b.onclick=function(){selected=b.dataset.stop;refresh();};
       });
       document.getElementById("fit").onclick=function(){fit(650);};
-      map.on("render",syncPoints);
-      map.on("move",syncPoints);
-      map.on("resize",syncPoints);
+      document.getElementById("gps").addEventListener("click",toggleDiagnostics);
+      map.on("move",queueLabels);
+      map.on("moveend",queueLabels);
+      map.on("resize",queueLabels);
       map.on("dragstart",function(){userMoved=true;});
       map.on("touchstart",function(){userMoved=true;});
       map.on("wheel",function(){userMoved=true;});
-      window.addEventListener("resize",syncScreenHeight);
-      if(window.visualViewport){
-        window.visualViewport.addEventListener("resize",syncScreenHeight);
-      }
-      selected="soho";refresh();setInterval(refresh,30000);
+      window.addEventListener("resize",function(){map.resize();queueLabels();});
+      selected="soho";
+      refresh();
+      setInterval(refresh,30000);
       ready=true;
       document.getElementById("status").style.display="none";
-      syncScreenHeight();
+      map.resize();
       fit(0);
       if(last)window.receiveVehicleData(last);
-      syncPoints();
-    }catch(err){
-      document.getElementById("status").textContent="Map setup error: "+err;
+      queueLabels();
+    }catch(e){
+      document.getElementById("status").textContent="Map setup error: "+e;
     }
   });
   map.on("error",function(err){
-    if(!ready&&err.error)document.getElementById("status").textContent="Map tile error: "+err.error.message;
+    if(!ready&&err.error){
+      document.getElementById("status").textContent="Map tile error: "+err.error.message;
+    }
   });
   setTimeout(function(){
     if(!ready)document.getElementById("status").textContent="Map timed out loading";
@@ -417,7 +394,7 @@ async function showMap(){
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
- 'html{margin:0;padding:0;width:100%;height:100%;background:#edf0f2}body{margin:0;padding:0;width:100%;height:100%;position:relative;overflow:hidden;font-family:-apple-system,sans-serif;background:#edf0f2}#map{position:absolute;inset:0;width:100%;height:100%;overflow:hidden}.geo-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:5}.geo-point{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none}.poi-visual{position:absolute;left:0;top:0;transform:translate(-50%,-100%);cursor:pointer;pointer-events:auto}.poi-shape{width:38px;height:50px;display:block;filter:drop-shadow(0 4px 5px rgba(22,34,50,.22))}.poi-logo{position:absolute;left:5px;top:5px;width:28px;height:28px;background:#d9ecf6;border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:hidden}.poi-logo img{display:block;width:100%;height:100%;object-fit:contain}.poi-logo-fallback{font-weight:700;font-size:9px;color:#152b43}.poi-label{position:absolute;left:50%;bottom:57px;transform:translateX(-50%);white-space:nowrap;background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;font-size:13px;font-weight:700;color:#18253a;line-height:1.18;letter-spacing:-.15px}.bus-visual{position:absolute;left:0;top:0;width:25px;height:25px;transform:translate(-50%,-50%);pointer-events:auto;cursor:pointer}.bus-badge{position:absolute;inset:0;z-index:2;border:2.5px solid white;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:14px;font-weight:750;line-height:1;box-shadow:0 3px 7px rgba(22,34,50,.25)}.bus-label{position:absolute;z-index:3;left:50%;bottom:32px;transform:translateX(-50%);background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;color:#18253a;font-size:13px;font-weight:700;line-height:1.18;letter-spacing:-.15px;white-space:nowrap;max-width:175px;text-overflow:ellipsis;overflow:hidden;pointer-events:none}.bus-rotor{position:absolute;z-index:1;left:50%;top:50%;width:44px;height:44px;pointer-events:none;transform-origin:center}.bus-arrow{position:absolute;top:0;left:50%;transform:translateX(-50%);width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:13px solid var(--bus-color,#2563eb);filter:drop-shadow(0 0 1px #fff)}#status{position:absolute;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:absolute;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:absolute;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}</style></head><body>'+
+ 'html{margin:0;padding:0;width:100%;height:100%;background:#edf0f2}body{margin:0;padding:0;width:100%;height:100%;position:relative;overflow:hidden;font-family:-apple-system,sans-serif;background:#edf0f2}#map{position:absolute;inset:0;width:100%;height:100%;overflow:hidden}.shuttle-dom-poi{width:38px;height:50px;cursor:pointer}.shuttle-dom-bus{width:25px;height:25px;cursor:pointer}.poi-visual{position:relative;width:38px;height:50px;cursor:pointer}.viewport-debug{display:none;position:absolute;z-index:80;top:calc(72px + env(safe-area-inset-top));left:12px;right:12px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.45;color:#172033;background:#fffffff5;border:1px solid #dce3ed;border-radius:12px;padding:12px;box-shadow:0 3px 14px #0003;pointer-events:auto}.poi-shape{width:38px;height:50px;display:block;filter:drop-shadow(0 4px 5px rgba(22,34,50,.22))}.poi-logo{position:absolute;left:5px;top:5px;width:28px;height:28px;background:#d9ecf6;border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:hidden}.poi-logo img{display:block;width:100%;height:100%;object-fit:contain}.poi-logo-fallback{font-weight:700;font-size:9px;color:#152b43}.poi-label{position:absolute;left:50%;bottom:57px;transform:translateX(-50%);white-space:nowrap;background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;font-size:13px;font-weight:700;color:#18253a;line-height:1.18;letter-spacing:-.15px}.bus-visual{position:relative;width:25px;height:25px;cursor:pointer}.bus-badge{position:absolute;inset:0;z-index:2;border:2.5px solid white;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:14px;font-weight:750;line-height:1;box-shadow:0 3px 7px rgba(22,34,50,.25)}.bus-label{position:absolute;z-index:3;left:50%;bottom:32px;transform:translateX(-50%);background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;color:#18253a;font-size:13px;font-weight:700;line-height:1.18;letter-spacing:-.15px;white-space:nowrap;max-width:175px;text-overflow:ellipsis;overflow:hidden;pointer-events:none}.bus-rotor{position:absolute;z-index:1;left:50%;top:50%;width:44px;height:44px;pointer-events:none;transform-origin:center}.bus-arrow{position:absolute;top:0;left:50%;transform:translateX(-50%);width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:13px solid var(--bus-color,#2563eb);filter:drop-shadow(0 0 1px #fff)}#status{position:absolute;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:absolute;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:absolute;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
  '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Scheduled departures, not live ETAs</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
  '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';('+mapUI.toString()+')();</'+'script></body></html>';
@@ -425,15 +402,6 @@ async function showMap(){
  let stop=false,busy=false,timer;
  async function poll(){if(!creds||stop||busy)return;busy=true;try{const s=await gps(creds);if(!stop)await web.evaluateJavaScript("window.receiveVehicleData && window.receiveVehicleData("+JSON.stringify(s)+")",false);}catch(e){if(!stop)try{await web.evaluateJavaScript("window.receiveVehicleError && window.receiveVehicleError("+JSON.stringify(String(e))+")",false);}catch(_){}}finally{busy=false;}}
  const dismissed=web.present(true);
- // Perform a second sizing pass after iOS presents the fullscreen WebView.
- try{
-   await web.evaluateJavaScript(
-     "window.shuttleSyncViewport && window.shuttleSyncViewport();",
-     false
-   );
- }catch(err){
-   console.warn("Viewport sizing fallback: "+err);
- }
  try{if(creds){timer=Timer.schedule(5000,true,()=>{poll().catch(e=>console.warn(e));});poll().catch(e=>console.warn(e));}await dismissed;}
  finally{stop=true;if(timer)timer.invalidate();}
 }
