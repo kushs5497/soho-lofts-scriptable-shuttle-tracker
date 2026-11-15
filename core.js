@@ -100,8 +100,18 @@ function mapUI(){
  // Station framing reserves top space for logo pins and labels.
  // No HTML markers, external overlays, transforms, root CSS, or WebView changes.
  const D=window.DATA;
+ if(D.developerMode)document.body.classList.add("developer-mode");
  document.getElementById("shuttle-version").textContent=String(D.version||"unknown");
  const map=new maplibregl.Map({container:"map",style:"https://tiles.openfreemap.org/styles/positron",center:D.soho,zoom:14.7,attributionControl:false});
+ map.addControl(new maplibregl.AttributionControl({compact:true}),"top-right");
+ // Explicitly start with the attribution closed, while retaining tap-to-expand.
+ const attributionElement=document.querySelector(".maplibregl-ctrl-attrib");
+ if(attributionElement){
+   attributionElement.classList.add("maplibregl-compact");
+   attributionElement.classList.remove("maplibregl-compact-show");
+   const infoButton=attributionElement.querySelector("button");
+   if(infoButton)infoButton.setAttribute("aria-expanded","false");
+ }
  const make=(xy,p)=>({type:"Feature",geometry:{type:"Point",coordinates:xy},properties:p});
  const fc=a=>({type:"FeatureCollection",features:a||[]});
  let ready=false,last=null,selected="soho";
@@ -114,89 +124,153 @@ function mapUI(){
    newport:[["33S","33rd Street","yellow"],["WTC","World Trade Center","green"],
             ["JSQ","Journal Square","yellow"],["HOB","Hoboken","blue"]]
  };
- function resetPathDotColors(){
-   if(!pathPopup||!activePathStation)return;
-   const defaults=PATH_ROWS[activePathStation]||[];
-   pathPopup.getElement().querySelectorAll(".path-row").forEach(el=>{
-     const times=el.querySelector(".path-times"),dot=el.querySelector(".path-dot");
-     if(!times||!dot)return;
-     const item=defaults.find(row=>row[0]===times.dataset.destination);
-     dot.dataset.route=item?item[2]:"blue";
-   });
+ // Three long-lived WebSockets populate shared cache; popup opens never request data.
+ const PATH_STREAMS=["ToNY,HOB","ToNY,NEW","ToNJ,NEW"];
+ const pathSnapshots={},pathStates={},pathSockets={};
+ let pathPopup=null,activePathStation=null;
+ function pathDest(headSign){
+   const h=String(headSign||"").trim().toLowerCase();
+   if(/^33(?:rd)?(?:\s*(?:st|street))?\b/.test(h))return "33S";
+   if(/^(?:world\s+trade\s+center|wtc)\b/.test(h))return "WTC";
+   if(/^(?:journal\s+square|jsq)\b/.test(h))return "JSQ";
+   if(/^hoboken\b/.test(h))return "HOB";
+   return null;
  }
- let pathPopup=null,activePathStation=null,pathRequest=null,pathRequestId=0;
- function pathLoading(){
-   if(!pathPopup)return;
-   resetPathDotColors();
-   pathPopup.getElement().querySelectorAll(".path-times").forEach(el=>{
-     el.textContent="";
-     const spinner=document.createElement("span");
-     spinner.className="path-spinner";
-     spinner.setAttribute("aria-label","Loading live arrival times");
-     el.appendChild(spinner);
-   });
-   const note=pathPopup.getElement().querySelector(".path-note");
-   if(note)note.textContent="Fetching live PATH arrivals…";
+ function pathColor(train,dest){
+   const raw=Array.isArray(train.lineColor)?train.lineColor.join(","):String(train.lineColor||"");
+   const color=raw.toUpperCase().replace(/[^A-F0-9,]/g,"");
+   const route=String(train.route||"").toUpperCase();
+   const head=String(train.headSign||"").toLowerCase();
+   if(dest==="WTC")return "green";
+   if(route.includes("JSQ_33_HOB")||head.includes("via hoboken")||(color.includes("4D92FB")&&color.includes("FF9900")))return "split";
+   if(color.includes("65C100")||route.includes("HOB_WTC"))return "green";
+   if(color.includes("4D92FB")||route.includes("HOB_33"))return "blue";
+   if(color.includes("FF9900")||route.includes("JSQ_33"))return "yellow";
+   return null;
  }
- function askPathRefresh(){
+ function updatePathPopup(){
    if(!pathPopup||!activePathStation)return;
-   pathLoading();
-   pathRequest={id:++pathRequestId,station:activePathStation};
+   const node=pathPopup.getElement();if(!node)return;
+   const now=Date.now(),code=activePathStation==="hoboken"?"HOB":"NEW";
+   const closest={};let latest=0,connected=false;
+   for(const key of PATH_STREAMS){
+     if(!key.endsWith(","+code))continue;
+     if(pathStates[key]&&pathStates[key].status==="connected")connected=true;
+     const snap=pathSnapshots[key];
+     if(!snap||now-snap.receivedAt>90000)continue;
+     for(const train of snap.messages){
+       if(!train)continue;
+       const dest=pathDest(train.headSign);
+       if(!(PATH_ROWS[activePathStation]||[]).some(r=>r[0]===dest))continue;
+       const updated=Date.parse(String(train.lastUpdated||"")),secs=Number(train.secondsToArrival);
+       if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000||!Number.isFinite(secs)||secs<0||secs>7200)continue;
+       const arrival=updated+secs*1000;
+       if(arrival<now-30000||arrival>now+7200000)continue;
+       latest=Math.max(latest,updated);
+       if(!closest[dest]||arrival<closest[dest].arrival)closest[dest]={arrival,color:pathColor(train,dest)};
+     }
+   }
+   node.querySelectorAll(".path-times").forEach(el=>{
+     const train=closest[el.dataset.destination];
+     const remain=train?train.arrival-now:null;
+     const value=remain==null?"—":remain<=35000?"Now":Math.max(1,Math.ceil(remain/60000))+" min";
+     if(el.textContent!==value)el.textContent=value;
+     const dot=el.parentNode&&el.parentNode.querySelector(".path-dot");
+     if(dot&&train&&["blue","yellow","green","split"].includes(train.color))dot.dataset.route=train.color;
+   });
+   const note=node.querySelector(".path-note");
+   if(note){
+     const label=latest?"RidePATH · Updated at "+new Date(latest).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}):
+       connected?"Waiting for live PATH arrivals…":"Connecting to RidePATH SignalR…";
+     if(note.textContent!==label)note.textContent=label;
+   }
  }
  function openPathPopup(feature){
    const station=feature.properties.id;
    if(!PATH_ROWS[station])return;
    if(pathPopup)pathPopup.remove();
    activePathStation=station;
-   const card=document.createElement("div");
-   card.className="path-popup";
-   const title=document.createElement("div");
-   title.className="path-heading";
-   title.textContent=(station==="hoboken"?"Hoboken":"Newport")+" PATH";
-   card.appendChild(title);
-   PATH_ROWS[station].forEach(([id,name,routeColor])=>{
+   const card=document.createElement("div");card.className="path-popup";
+   const title=document.createElement("div");title.className="path-heading";
+   title.textContent=(station==="hoboken"?"Hoboken":"Newport")+" PATH";card.appendChild(title);
+   PATH_ROWS[station].forEach(([id,name,color])=>{
      const row=document.createElement("div");row.className="path-row";
-     const dot=document.createElement("span");dot.className="path-dot";dot.dataset.route=routeColor;
+     const dot=document.createElement("span");dot.className="path-dot";dot.dataset.route=color;
      const label=document.createElement("span");label.className="path-label";label.textContent=name;
-     const times=document.createElement("span");times.className="path-times";
-     times.dataset.destination=id;
+     const times=document.createElement("span");times.className="path-times";times.dataset.destination=id;times.textContent="—";
      row.appendChild(dot);row.appendChild(label);row.appendChild(times);card.appendChild(row);
    });
    const note=document.createElement("div");note.className="path-note";card.appendChild(note);
-   card.addEventListener("click",()=>{if(activePathStation===station)askPathRefresh();});
    const popupObj=new maplibregl.Popup({offset:12,maxWidth:"calc(100vw - 24px)",closeOnClick:false,className:"path-arrival-popup"})
      .setLngLat(feature.geometry.coordinates).setDOMContent(card).addTo(map);
    pathPopup=popupObj;
-   popupObj.on("close",()=>{
-     if(pathPopup===popupObj){pathPopup=null;activePathStation=null;pathRequest=null;}
-   });
-   askPathRefresh();
+   popupObj.on("close",()=>{if(pathPopup===popupObj){pathPopup=null;activePathStation=null;}});
+   updatePathPopup();
  }
- window.takePathStationRequest=()=>{const r=pathRequest;pathRequest=null;return r;};
- window.receivePathStationData=payload=>{
-   if(!payload||!pathPopup||payload.id!==pathRequestId||payload.station!==activePathStation)return;
-   const element=pathPopup.getElement(),note=element.querySelector(".path-note");
-   if(payload.error){
-     element.querySelectorAll(".path-times").forEach(x=>x.textContent="—");
-     note.textContent="Live times unavailable. Tap to retry.";
-     return;
+ // Native Scriptable prepares fresh negotiation URLs only for disconnected streams.
+ window.pathStreamHealth=()=>{
+   const now=Date.now();
+   return PATH_STREAMS.filter(key=>{
+     const state=pathStates[key];
+     if(!state)return true;
+     if(state.status==="connecting"&&now-state.started<25000)return false;
+     if(state.status==="connected"&&now-state.lastMessage<90000)return false;
+     return true;
+   });
+ };
+ window.pathStreamFailure=(key,error)=>{
+   if(!PATH_STREAMS.includes(key))return;
+   pathStates[key]={status:"error",started:Date.now(),lastMessage:0,error:String(error)};
+   updatePathPopup();
+ };
+ window.pathInstallStreams=feeds=>{
+   for(const feed of feeds){
+     if(!feed||!PATH_STREAMS.includes(feed.expected)||typeof feed.url!=="string")continue;
+     const key=feed.expected,old=pathSockets[key];
+     if(old){try{old.close();}catch(_){}}
+     const state={status:"connecting",started:Date.now(),lastMessage:0,error:null};
+     pathStates[key]=state;
+     let ws;
+     try{ws=new WebSocket(feed.url);}
+     catch(err){state.status="error";state.error=String(err);continue;}
+     pathSockets[key]=ws;
+     ws.onopen=()=>{
+       if(pathSockets[key]!==ws)return;
+       state.status="connected";state.lastMessage=Date.now();
+       ws.send(JSON.stringify({protocol:"json",version:1})+String.fromCharCode(30));
+       updatePathPopup();
+     };
+     ws.onerror=()=>{
+       if(pathSockets[key]!==ws)return;
+       state.status="error";state.error="WebSocket error";updatePathPopup();
+     };
+     ws.onclose=e=>{
+       if(pathSockets[key]!==ws)return;
+       state.status="closed";state.error="WebSocket closed "+e.code;updatePathPopup();
+     };
+     ws.onmessage=event=>{
+       if(pathSockets[key]!==ws||typeof event.data!=="string")return;
+       for(const frame of event.data.split(String.fromCharCode(30))){
+         if(!frame)continue;
+         try{
+           const msg=JSON.parse(frame);
+           if(msg.error){state.status="error";state.error=String(msg.error);ws.close();continue;}
+           if(msg.target!=="SendMessage")continue;
+           const args=msg.arguments||[];
+           if(args.length<2||!String(args[0]).endsWith(","+key))continue;
+           const payload=typeof args[1]==="string"?JSON.parse(args[1]):args[1];
+           if(!payload||payload.target!==feed.code||!Array.isArray(payload.messages))continue;
+           pathSnapshots[key]={messages:payload.messages,receivedAt:Date.now()};
+           state.status="connected";state.lastMessage=Date.now();state.error=null;
+           updatePathPopup();
+         }catch(err){state.error=String(err);}
+       }
+     };
    }
-   const d=payload.result||{};
-   const rows=Array.isArray(d.rows)?d.rows:[];
-   const byId={};rows.forEach(r=>{byId[r.id]=r;});
-   element.querySelectorAll(".path-times").forEach(el=>{
-     const row=byId[el.dataset.destination];
-     el.textContent=row&&row.times&&row.times.length?row.times[0]:"—";
-     // Change the circle only when a fresh train prediction identifies a line.
-     const dot=el.parentNode&&el.parentNode.querySelector(".path-dot");
-     if(dot&&row&&row.times&&row.times.length&&
-         ["blue","yellow","green","split"].includes(row.routeColor))
-       dot.dataset.route=row.routeColor;
-   });
-   note.textContent=(d.source?d.source+" · ":"")+(d.updatedAt?"Updated "+new Date(d.updatedAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):"No current predictions");
- }
- setInterval(()=>{if(activePathStation)askPathRefresh();},30000);
-
+   updatePathPopup();
+ };
+ // Local second-by-second countdown; never refetch or show a loading spinner.
+ setInterval(updatePathPopup,1000);
 
  function safe(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
  function decode(uri){return new Promise(ok=>{if(!uri)return ok(null);const i=new Image();i.onload=()=>ok(i);i.onerror=()=>ok(null);i.src=uri;});}
@@ -276,10 +350,9 @@ function mapUI(){
    x.fillStyle=color;x.fill();x.lineWidth=1.5;x.strokeStyle="#fff";x.stroke();
    return x.getImageData(0,0,c.width,c.height);
  }
- function fit(duration,includeVehicles=false){
+ function fit(duration){
    const bounds=new maplibregl.LngLatBounds();
    [D.soho,D.hob,D.npt].forEach(p=>bounds.extend(p));
-   if(includeVehicles&&last)last.vehicles.forEach(v=>bounds.extend([v.lon,v.lat]));
    // Keep Hoboken title-box clearance at the top of a shortened WebView.
    // Add 20px at the right to give PATH labels more breathing room.
    map.fitBounds(bounds,{padding:{top:255,bottom:230,left:55,right:75},maxZoom:15.5,duration});
@@ -340,13 +413,15 @@ function mapUI(){
      });
    });
    map.getSource("shuttles").setData(fc(features));
-   document.getElementById("gps").textContent=snapshot.vehicles.length+" vehicle"+
-     (snapshot.vehicles.length===1?"":"s")+" · Synced "+new Date(snapshot.at).toLocaleTimeString();
+   const synced=new Date(snapshot.at).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+   document.getElementById("sync-time").textContent="Updated at "+synced;
+   if(D.developerMode)document.getElementById("gps").textContent=snapshot.vehicles.length+" vehicle"+
+     (snapshot.vehicles.length===1?"":"s")+" · Synced "+synced;
    // Receiving new GPS data never changes the user's chosen map framing.
    return true;
  }
  window.receiveVehicleData=updateVehicles;
- window.receiveVehicleError=e=>{document.getElementById("gps").textContent="GPS: "+String(e);};
+ window.receiveVehicleError=e=>{if(D.developerMode)document.getElementById("gps").textContent="GPS: "+String(e);};
  map.on("load",async()=>{
    try{
      const logos=await Promise.all(D.logos.map(decode));
@@ -404,13 +479,12 @@ function mapUI(){
      document.querySelectorAll("#tabs button").forEach(b=>{
        b.onclick=()=>{selected=b.dataset.stop;refresh();};
      });
-     document.getElementById("fit").onclick=()=>fit(650,true);
      // Tap GPS status to inspect an intermittent Scriptable/iOS viewport
      // problem without altering fullscreen sizing or rendered map layers.
      const gpsStatus=document.getElementById("gps");
      gpsStatus.style.cursor="pointer";
      gpsStatus.setAttribute("title","Tap for viewport diagnostics");
-     gpsStatus.onclick=()=>{
+     gpsStatus.onclick=()=>{if(!D.developerMode)return;
        let panel=document.getElementById("shuttle-debug");
        if(!panel){
          panel=document.createElement("div");panel.id="shuttle-debug";
@@ -445,139 +519,59 @@ function mapUI(){
 // Try PANYNJ first. Its feed sometimes returns {"results":[]}, so a separate
 // station-specific API may be tried once as a best-effort fallback.
 // Neither source is assumed to be live unless timestamps confirm freshness.
-const PATH_FEED="https://www.panynj.gov/bin/portauthority/ridepath.json";
-const PATH_ALT="https://path.api.razza.dev/v1/stations/";
 const PATH_CODES={hoboken:"HOB",newport:"NEW"};
-const PATH_DEST={
- HOB:[{id:"33S",name:"33rd Street"},{id:"WTC",name:"World Trade Center"}],
- NEW:[{id:"33S",name:"33rd Street"},{id:"WTC",name:"World Trade Center"},
-      {id:"JSQ",name:"Journal Square"},{id:"HOB",name:"Hoboken"}]
-};
-let pathOfficialCache=null,pathOfficialCachedAt=0,pathAltCooldownUntil=0;
-function pathDestination(text){
- const s=String(text||"").trim().toLowerCase();
- if(/^33(?:rd)?(?:\s*(?:st|street))?\b/.test(s))return "33S";
- if(/^world\s+trade\s+center\b|^wtc\b/.test(s))return "WTC";
- if(/^journal\s+square\b|^jsq\b/.test(s))return "JSQ";
- if(/^hoboken\b/.test(s))return "HOB";
- return null;
+// Experimental RidePATH SignalR client. No app credential is stored in GitHub.
+const PATH_SIGNALR_KEY="soho-path-signalr-app-token-v1";
+const PATH_SIGNALR_ENDPOINT="https://panynj-path-af-tb.azurewebsites.net/api/tokenrequest?TKrTIgWSdgikIrqvftckyOh";
+async function pathSignalRSetup(){
+ if(Keychain.contains(PATH_SIGNALR_KEY))return;
+ const alert=new Alert();
+ alert.title="SignalR test credential";
+ alert.message="Enter the RidePATH app bearer token once. It remains in this iPhone's Scriptable Keychain, not GitHub. Cancel leaves SignalR unconfigured until the next launch.";
+ alert.addSecureTextField("RidePATH app bearer token");
+ alert.addAction("Save on iPhone");
+ alert.addCancelAction("Not now");
+ if(await alert.presentAlert()<0)return;
+ const value=alert.textFieldValue(0).trim().replace(/^Bearer\s+/i,"");
+ if(value)Keychain.set(PATH_SIGNALR_KEY,value);
 }
-function pathEtaText(eta,now){
- const remaining=(eta-now)/1000;
- if(!Number.isFinite(remaining)||remaining < -30||remaining > 7200)return null;
- return remaining<=35?"Now":Math.max(1,Math.ceil(remaining/60))+" min";
-}
-function pathBuildRows(code){return PATH_DEST[code].map(r=>({id:r.id,name:r.name,times:[],at:Infinity}));}
-function pathTrainColor(headsign,lineColor,routeId,destination){
- // Official RidePATH lineColor identifies blue, yellow, green, and the
- // blue/yellow service, independently of the destination/headsign.
- // The community feed instead provides lineColors[] and a route ID.
- const colors=Array.isArray(lineColor)?lineColor.join(","):String(lineColor||"");
- const compact=colors.replace(/[^a-fA-F0-9,]/g,"").toUpperCase();
- const route=String(routeId||"").toUpperCase();
- const text=String(headsign||"").toLowerCase();
- if(destination==="WTC")return "green";
- if(route.includes("JSQ_33_HOB")||(/via\s+hoboken/i).test(text)||
-     (compact.includes("4D92FB")&&compact.includes("FF9900")))
-   return "split";
- if(route.includes("HOB_WTC")||compact.includes("65C100"))return "green";
- if(route.includes("HOB_33")||compact.includes("4D92FB"))return "blue";
- if(route.includes("JSQ_33")||compact.includes("FF9900"))return "yellow";
- return null; // The popup keeps its station-specific color when unknown.
-}
-function pathSetSoonest(rows,headsign,arrival,now,lineColor,routeId){
- const id=pathDestination(headsign);
- if(!id)return;
- const row=rows.find(r=>r.id===id);
- const text=pathEtaText(arrival,now);
- if(row && text && arrival < row.at){
-   row.at=arrival;row.times=[text];
-   row.routeColor=pathTrainColor(headsign,lineColor,routeId,id);
- }
-}
-function pathResult(code,rows,source,updatedAt){
- // The map displays one countdown and a line-colored circle per destination.
- return {station:code,rows:rows.map(r=>({
-   id:r.id,name:r.name,times:r.times,routeColor:r.routeColor||null
- })),updatedAt,source,status:"Live arrival predictions"};
-}
-async function pathJson(url,timeout){
- const req=new Request(url);req.timeoutInterval=timeout;
- req.headers={Accept:"application/json","Cache-Control":"no-cache"};
+async function pathSignalRPost(url,body,headers){
+ const req=new Request(url);
+ req.method="POST";
+ req.timeoutInterval=12;
+ req.headers=headers;
+ req.body=body;
  const raw=await req.loadString();
- const http=req.response&&req.response.statusCode;
- if(http>=400)throw Error("PATH HTTP "+http);
+ const status=req.response&&req.response.statusCode;
+ if(status===204||status>=400)throw Error("SignalR HTTP "+status);
  return JSON.parse(raw);
 }
-async function pathOfficial(code){
- let feed=pathOfficialCache;
- if(!feed||Date.now()-pathOfficialCachedAt>15000){
-   feed=await pathJson(PATH_FEED+"?timeStamp="+Date.now(),9);
-   if(!feed||!Array.isArray(feed.results)||!feed.results.length)
-     throw Error("Official feed returned no station data");
-   pathOfficialCache=feed;pathOfficialCachedAt=Date.now();
- }
- const station=feed.results.find(r=>r&&String(r.consideredStation||"").toUpperCase()===code);
- if(!station)throw Error("Station absent from official feed");
- const rows=pathBuildRows(code),now=Date.now();
- let latest=0;
- for(const direction of (station.destinations||[])){
-   for(const m of (direction.messages||[])){
-     if(!m)continue;
-     const updated=Date.parse(String(m.lastUpdated||""));
-     if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000)continue;
-     const seconds=Number(m.secondsToArrival);
-     if(!Number.isFinite(seconds)||String(m.secondsToArrival||"").trim()==="")continue;
-     latest=Math.max(latest,updated);
-     pathSetSoonest(rows,m.headSign,updated+seconds*1000,now,m.lineColor,m.route);
-   }
- }
- if(!rows.some(r=>r.times.length))throw Error("Official feed has no current predictions");
- return pathResult(code,rows,"PANYNJ",latest);
-}
-async function pathAlternative(station,code){
- if(Date.now()<pathAltCooldownUntil)throw Error("Secondary feed temporarily unavailable");
- try{
-   const feed=await pathJson(PATH_ALT+station+"/realtime",6);
-   if(!feed||!Array.isArray(feed.upcomingTrains)||!feed.upcomingTrains.length)
-     throw Error("Secondary feed has no trains");
-   const rows=pathBuildRows(code),now=Date.now();
-   let latest=0;
-   for(const m of feed.upcomingTrains){
-     if(!m)continue;
-     const updated=Date.parse(String(m.lastUpdated||""));
-     const eta=Date.parse(String(m.projectedArrival||""));
-     if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000)continue;
-     latest=Math.max(latest,updated);
-     pathSetSoonest(rows,m.headsign,eta,now,m.lineColors||m.lineColor||m.line_color,m.route);
-   }
-   if(!rows.some(r=>r.times.length))throw Error("Secondary feed has no current predictions");
-   return pathResult(code,rows,"PATH data API",latest);
- }catch(e){
-   // Do not retry a failing community service on every 30-second refresh.
-   pathAltCooldownUntil=Date.now()+60000;
-   throw e;
- }
-}
-async function fetchArrivals(station){
- const code=PATH_CODES[station];
- if(!code)throw Error("Unknown PATH station");
- try{return await pathOfficial(code);}
- catch(officialError){
-   try{return await pathAlternative(station,code);}
-   catch(alternativeError){
-     throw Error("No current train predictions from either source");
-   }
- }
+async function pathSignalRConnectParams(code,direction){
+ const credential=Keychain.get(PATH_SIGNALR_KEY);
+ const station=code==="HOB"?"Hoboken":"Newport";
+ const auth=await pathSignalRPost(PATH_SIGNALR_ENDPOINT,
+   JSON.stringify({station,direction}),
+   {Authorization:"Bearer "+credential,AppName:"RidePATH",AppVersion:"6.2.2","Content-Type":"application/json"});
+ if(!auth||!auth.Url||!auth.AccessToken)throw Error("SignalR token missing");
+ const base=String(auth.Url);
+ const negotiate=base.replace(/^https?:/,"https:").replace(/\/client\/?/,"/client/negotiate");
+ const separator=negotiate.includes("?")?"&":"?";
+ const info=await pathSignalRPost(negotiate+separator+"negotiateVersion=1","",
+   {Authorization:"Bearer "+auth.AccessToken});
+ if(!info||!info.connectionToken)throw Error("SignalR negotiation missing connectionToken");
+ const wsUrl=base.replace(/^https?:/,"wss:");
+ const sep=wsUrl.includes("?")?"&":"?";
+ return {code,direction,expected:(direction==="New York"?"ToNY":"ToNJ")+","+code,
+   url:wsUrl+sep+"id="+encodeURIComponent(info.connectionToken)+"&access_token="+encodeURIComponent(auth.AccessToken)};
 }
 // version.json is the only source of release version information.
 // The existing launcher already fetches it; core reads it as well because
 // installed launchers do not pass version info into imported modules.
 // Offline, use the launcher's locally saved last-successful version.
-async function getAppVersion(){
+async function getAppVersion(branch){
  const valid=v=>typeof v==="string"&&/^[0-9]+[.][0-9]+[.][0-9]+$/.test(v);
  try{
-   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/main/version.json?t="+Date.now());
+   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/"+encodeURIComponent(branch||"main")+"/version.json?t="+Date.now());
    req.timeoutInterval=6;
    req.headers={"Cache-Control":"no-cache",Accept:"application/json"};
    const raw=await req.loadString();
@@ -588,7 +582,7 @@ async function getAppVersion(){
  }catch(e){console.warn("Version manifest unavailable: "+e);}
  try{
    const fm=FileManager.local();
-   const path=fm.joinPath(fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime"),"update-state.json");
+   const path=fm.joinPath(fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime-"+(branch||"main")),"update-state.json");
    if(fm.fileExists(path)){
      const state=JSON.parse(fm.readString(path));
      if(state&&valid(state.version))return state.version;
@@ -596,44 +590,81 @@ async function getAppVersion(){
  }catch(e){console.warn("Cached version unavailable: "+e);}
  return "unknown";
 }
-async function showMap(){
- const versionPromise=getAppVersion();
+async function showMap(version,developerMode,branch){
+ const versionPromise=version ? Promise.resolve(version) : getAppVersion(branch);
+ await pathSignalRSetup();
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
- const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,version:await versionPromise};
+ const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,developerMode:!!developerMode,version:await versionPromise};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
- 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-arrival-popup{max-width:calc(100vw - 24px)}.path-arrival-popup .maplibregl-popup-content{box-sizing:border-box;padding:7px 8px;border-radius:10px;max-width:calc(100vw - 24px);max-height:calc(100vh - 80px);overflow-y:auto}.path-popup{width:194px;max-width:calc(100vw - 44px);color:#15253b;font:11.5px -apple-system,system-ui,sans-serif}.path-arrival-popup .maplibregl-popup-close-button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:400;color:#334155;border-radius:12px;cursor:pointer}.path-arrival-popup .maplibregl-popup-close-button:active{background:#e2e8f0}.path-heading{display:flex;align-items:center;min-height:36px;font-size:12px;font-weight:700;margin-bottom:1px;padding-right:42px}.path-row{display:flex;align-items:center;gap:5px;min-height:24px;border-top:1px solid #edf0f5}.path-dot{height:11px;width:11px;border-radius:50%;background:#4D92FB;flex-shrink:0}.path-dot[data-route=blue]{background:#4D92FB}.path-dot[data-route=yellow]{background:#FF9900}.path-dot[data-route=green]{background:#65C100}.path-dot[data-route=split]{background:linear-gradient(145deg,#4D92FB 0%,#4D92FB 45%,#fff 46%,#fff 54%,#FF9900 55%,#FF9900 100%)}.path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.path-times{font-size:12px;font-weight:700;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:43px}.path-spinner{display:inline-block;width:11px;height:11px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:9px;color:#718096;border-top:1px solid #edf0f5;padding-top:5px;margin-top:2px}</style></head><body>'+
- '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
- '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle ETA · PATH predictions · v<span id="shuttle-version"></span></small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
- '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';try{('+mapUI.toString()+')();}catch(e){var status=document.getElementById("status");if(status){status.style.display="block";status.textContent="Map startup error: "+String(e);}}</'+'script></body></html>';
- const web=new WebView();await web.loadHTML(html,"https://openfreemap.org/");
+ 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}html,body{background:#fff}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#panel-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}#title{font-weight:bold}#sync-time{font-size:10px;color:#64748b;white-space:nowrap;font-variant-numeric:tabular-nums}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}.maplibregl-ctrl-attrib,.maplibregl-ctrl-attrib-inner{font-size:11px}.maplibregl-ctrl-top-right{top:calc(8px + env(safe-area-inset-top));right:8px}.developer-mode .maplibregl-ctrl-top-right{top:calc(68px + env(safe-area-inset-top))}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-arrival-popup{max-width:calc(100vw - 24px)}.path-arrival-popup .maplibregl-popup-content{box-sizing:border-box;padding:7px 8px;border-radius:10px;max-width:calc(100vw - 24px);max-height:calc(100vh - 80px);overflow-y:auto}.path-popup{width:194px;max-width:calc(100vw - 44px);color:#15253b;font:11.5px -apple-system,system-ui,sans-serif}.path-arrival-popup .maplibregl-popup-close-button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:400;color:#334155;border-radius:12px;cursor:pointer}.path-arrival-popup .maplibregl-popup-close-button:active{background:#e2e8f0}.path-heading{display:flex;align-items:center;min-height:36px;font-size:12px;font-weight:700;margin-bottom:1px;padding-right:42px}.path-row{display:flex;align-items:center;gap:5px;min-height:24px;border-top:1px solid #edf0f5}.path-dot{height:11px;width:11px;border-radius:50%;background:#4D92FB;flex-shrink:0}.path-dot[data-route=blue]{background:#4D92FB}.path-dot[data-route=yellow]{background:#FF9900}.path-dot[data-route=green]{background:#65C100}.path-dot[data-route=split]{background:linear-gradient(145deg,#4D92FB 0%,#4D92FB 45%,#fff 46%,#fff 54%,#FF9900 55%,#FF9900 100%)}.path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.path-times{font-size:12px;font-weight:700;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:43px}.path-spinner{display:inline-block;width:11px;height:11px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:9px;color:#718096;border-top:1px solid #edf0f5;padding-top:5px;margin-top:2px}</style></head><body>'+
+ '<div id="map"></div><div id="status">Loading map…</div>' +
+ (developerMode ? '<div id="top"><span id="gps">Waiting for GPS…</span></div>' : '<span id="gps" style="display:none"></span>') +
+ '<div id="panel"><div id="panel-heading"><div id="title">SoHo Lofts</div><div id="sync-time">Updated at —</div></div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle ETA · PATH predictions · v<span id="shuttle-version"></span></small>' + (developerMode ? '<div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div>' : '') + '</div>'+
+ '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.onerror=function(message){var e=document.getElementById("status");if(e){e.style.display="block";e.textContent="Map JavaScript error: "+message;}};window.DATA='+JSON.stringify(data)+';try{('+mapUI.toString()+')();}catch(e){var status=document.getElementById("status");if(status){status.style.display="block";status.textContent="Map startup error: "+String(e);}}</'+'script></body></html>';
+ const web=new WebView();
+ // Load and verify the map document before presenting or starting SignalR.
+ try {
+   await web.loadHTML(html,"https://openfreemap.org/");
+   const sanity=await web.evaluateJavaScript(
+     "(function(){return {ready:document.readyState,map:!!document.getElementById('map'),status:!!document.getElementById('status'),version:document.getElementById('shuttle-version')?.textContent||''};})()",
+     false
+   );
+   console.log("Map WebView preflight: "+JSON.stringify(sanity));
+   if(!sanity||!sanity.map||!sanity.status)throw Error("Map document not initialized");
+ } catch(e) {
+   console.warn("Map WebView startup failed: "+e);
+   const a=new Alert();a.title="SignalR map startup error";
+   a.message="The map WebView could not initialize: "+String(e);
+   a.addAction("OK");await a.presentAlert();
+   return;
+ }
  let stop=false,busy=false,timer,pathTimer,pathBusy=false;
- async function pollPath(){
-   if(stop||pathBusy)return;
-   let q;
-   try{
-     q=await web.evaluateJavaScript("window.takePathStationRequest && window.takePathStationRequest()",false);
-   }catch(_){return;}
-   if(!q||!["hoboken","newport"].includes(q.station))return;
+ const FEEDS=[
+   ["HOB","New York","ToNY,HOB"],
+   ["NEW","New York","ToNY,NEW"],
+   ["NEW","New Jersey","ToNJ,NEW"]
+ ];
+ const retryAfter={};
+ async function maintainPathStreams(){
+   if(stop||pathBusy||!Keychain.contains(PATH_SIGNALR_KEY))return;
    pathBusy=true;
    try{
-     const data=await fetchArrivals(q.station);
-     if(!stop)await web.evaluateJavaScript("window.receivePathStationData && window.receivePathStationData("+JSON.stringify({id:q.id,station:q.station,result:data})+")",false);
-   }catch(e){
-     if(!stop)try{
-       await web.evaluateJavaScript("window.receivePathStationData && window.receivePathStationData("+JSON.stringify({id:q.id,station:q.station,error:String(e)})+")",false);
-     }catch(_){}
-   }finally{pathBusy=false;}
+     const keys=await web.evaluateJavaScript("window.pathStreamHealth ? window.pathStreamHealth() : []",false);
+     if(!Array.isArray(keys))return;
+     const now=Date.now();
+     const due=FEEDS.filter(f=>keys.includes(f[2])&&now>=(retryAfter[f[2]]||0));
+     if(!due.length)return;
+     // Independent tokens, negotiation and WebSockets; failure of one does not block others.
+     due.forEach(f=>{retryAfter[f[2]]=now+30000;});
+     const prepared=await Promise.allSettled(due.map(f=>pathSignalRConnectParams(f[0],f[1])));
+     for(let i=0;i<prepared.length;i++){
+       const result=prepared[i],key=due[i][2];
+       if(stop)return;
+       if(result.status==="fulfilled"){
+         const conn=result.value;
+         await web.evaluateJavaScript("window.pathInstallStreams && window.pathInstallStreams("+JSON.stringify([conn])+")",false);
+       }else{
+         const error=String(result.reason);
+         console.warn("SignalR "+key+": "+error);
+         await web.evaluateJavaScript("window.pathStreamFailure && window.pathStreamFailure("+JSON.stringify(key)+","+JSON.stringify(error)+")",false);
+       }
+     }
+   }catch(err){console.warn("SignalR stream manager: "+err);}
+   finally{pathBusy=false;}
  }
  async function poll(){if(!creds||stop||busy)return;busy=true;try{const s=await gps(creds);if(!stop)await web.evaluateJavaScript("window.receiveVehicleData && window.receiveVehicleData("+JSON.stringify(s)+")",false);}catch(e){if(!stop)try{await web.evaluateJavaScript("window.receiveVehicleError && window.receiveVehicleError("+JSON.stringify(String(e))+")",false);}catch(_){}}finally{busy=false;}}
  const dismissed=web.present(true);
  try{
-   // Keep PATH polling entirely separate from map startup. The polling
-   // bridge becomes active only after the WebView has had time to render.
-   pathTimer=Timer.schedule(2500,true,()=>{pollPath().catch(e=>console.warn("PATH: "+e));});
+   // Connect all three streams on map launch; monitor only for disconnected streams.
+   pathTimer=Timer.schedule(25000,true,()=>{maintainPathStreams().catch(e=>console.warn("PATH: "+e));});
+   // Delay the first WebSocket negotiations until the map is visibly presented.
+   const startupTimer=Timer.schedule(3500,false,()=>{
+     maintainPathStreams().catch(e=>console.warn("PATH: "+e));
+   });
    if(creds){timer=Timer.schedule(5000,true,()=>{poll().catch(e=>console.warn(e));});poll().catch(e=>console.warn(e));}
    await dismissed;
  }
  finally{stop=true;if(timer)timer.invalidate();if(pathTimer)pathTimer.invalidate();}
 }
-async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap();}
+async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap(options.version,options.developerMode,options.branch);}
 module.exports.main=main;
