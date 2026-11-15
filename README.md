@@ -32,3 +32,34 @@ The weekday temporary service takes effect on November 16, 2026. In evening auto
 - `core.js`: hosted widget and map implementation
 - `version.json`: update detection
 - PATH arrivals: fetched directly in `core.js` with Scriptable native `Request` (no external PATH module)
+
+## Experimental SignalR branch (iPhone testing)
+
+The `main` branch remains the production version. On this `SignalR` branch, install the
+branch-aware `SoHo_Shuttle_Launcher.js` in your existing Scriptable script. Change the one
+line `const BRANCH = "main";` to `const BRANCH = "SignalR";` to opt into the test.
+Set it back to `main` to return to the production widget. Each branch uses an isolated
+local cache (including its own version manifest), so a failed experimental download
+cannot run a cached production build by mistake.
+
+When you first tap the widget to open the map on the SignalR branch, Scriptable will ask
+for the RidePATH **app-level bearer token**. Paste it once; the value is saved in
+Scriptable's local Keychain and is **not committed to this public GitHub repository**.
+Canceling the prompt keeps the existing PATH feed behavior.
+
+The experiment requests SignalR tokens and negotiates connections using native
+Scriptable `Request`. It then attempts the WebSocket handshake in the **existing map
+WebView**, passing browser authentication through the `access_token` query parameter.
+Hoboken subscribes to `ToNY,HOB`; Newport subscribes to `ToNY,NEW` and `ToNJ,NEW`
+concurrently. Each stream is read until one usable update arrives or a 13-second
+timeout; the connections are then closed. New native requests are made on the
+existing 30-second popup refresh cycle. A successful response is mapped into the
+existing colored PATH countdown rows. If SignalR fails, it falls back to the
+unchanged PANYNJ/community-feed sequence.
+
+**Unverified:** Browser WebSocket authentication, CORS/origin behavior and concurrent
+Scriptable WebView evaluation must be tested on the iPhone. GitHub commits and static
+syntax checks are not evidence that the WebSocket connects successfully. The small
+rectangular Home Screen widget continues to display the shuttle timetable, as it
+did before; SignalR changes affect the PATH popups in the map opened by tapping it.
+No always-on background WebSocket is used.
