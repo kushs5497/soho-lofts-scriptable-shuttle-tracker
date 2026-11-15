@@ -5,8 +5,9 @@
 // Any GitHub branch name can be used here; main is the default.
 const BRANCH = "main";
 const DEVELOPER_MODE = false; // true enables diagnostics and expanded map credits
-// Set this privately in your local Scriptable launcher before sharing it.
-// Never commit your RidePATH bearer token to this public repository.
+// Enter credentials only in your local Scriptable launcher; never commit them to public GitHub.
+const SHUTTLE_USERNAME = "";
+const SHUTTLE_PASSWORD = "";
 const RIDEPATH_SECRET_TOKEN = "";
 const REPO = "https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/" + encodeURIComponent(BRANCH) + "/";
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;
@@ -46,7 +47,7 @@ async function runModule(path) {
   if (!app || typeof app.main !== "function") {
     throw new Error("Downloaded module does not export main()");
   }
-  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH, version: state.version, developerMode: DEVELOPER_MODE, ridePathToken: RIDEPATH_SECRET_TOKEN });
+  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH, version: state.version, developerMode: DEVELOPER_MODE, ridePathToken: RIDEPATH_SECRET_TOKEN, shuttleCredentials: {user: SHUTTLE_USERNAME, pass: SHUTTLE_PASSWORD} });
 }
 async function showFailure(message) {
   if (config.runsInWidget) {
