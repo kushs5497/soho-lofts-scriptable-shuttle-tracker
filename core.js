@@ -97,14 +97,14 @@ async function gps(creds){
 }
 async function imageData(url,svg){try{const r=new Request(url);r.timeoutInterval=10;if(svg){const x=await r.loadString();return "data:image/svg+xml;base64,"+Data.fromString(x).toBase64String();}return "data:image/png;base64,"+Data.fromPNG(await r.loadImage()).toBase64String();}catch(_){return null;}}
 function mapUI(){
- // v17.4: render all pins and title boxes in MapLibre's native symbol layers.
+ // v17.4.1: destination title boxes only; shuttles show numbered icons.
  // No HTML markers, external overlays, transforms, root CSS, or WebView changes.
  const D=window.DATA;
  const map=new maplibregl.Map({container:"map",style:"https://tiles.openfreemap.org/styles/positron",center:D.soho,zoom:14.7,attributionControl:false});
  const make=(xy,p)=>({type:"Feature",geometry:{type:"Point",coordinates:xy},properties:p});
  const fc=a=>({type:"FeatureCollection",features:a||[]});
  let ready=false,last=null,selected="soho",first=true;
- const vehicles=new Map(),titleCache=new Map();
+ const vehicles=new Map();
 
  function safe(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
  function decode(uri){return new Promise(ok=>{if(!uri)return ok(null);const i=new Image();i.onload=()=>ok(i);i.onerror=()=>ok(null);i.src=uri;});}
@@ -184,23 +184,6 @@ function mapUI(){
    x.fillStyle=color;x.fill();x.lineWidth=1.5;x.strokeStyle="#fff";x.stroke();
    return x.getImageData(0,0,c.width,c.height);
  }
- function busTitle(text){
-   const scale=2,c=document.createElement("canvas"),probe=c.getContext("2d");
-   probe.font="700 13px -apple-system, system-ui, Arial, sans-serif";
-   const width=Math.max(86,Math.ceil(probe.measureText(text).width)+36);
-   const height=44;c.width=width*scale;c.height=height*scale;
-   const x=c.getContext("2d");x.scale(scale,scale);whiteBox(x,text,width/2,5);
-   return {data:x.getImageData(0,0,c.width,c.height),width,height};
- }
- function registerTitle(id,title){
-   const key="bus-title-"+String(id),cached=titleCache.get(key);
-   if(cached&&cached.title===title)return cached;
-   if(cached&&map.hasImage(key))map.removeImage(key);
-   const asset=busTitle(title);
-   map.addImage(key,asset.data,{pixelRatio:2});
-   const next={id:key,title,width:asset.width,height:asset.height};
-   titleCache.set(key,next);return next;
- }
  function fit(duration){
    const bounds=new maplibregl.LngLatBounds();
    [D.soho,D.hob,D.npt].forEach(p=>bounds.extend(p));
@@ -242,31 +225,13 @@ function mapUI(){
    last=snapshot;
    if(!ready)return true;
    vehicles.clear();
-   // Assign vertical lanes only to labels near each other in map pixels.
-   // Pin/circle positions themselves never move.
-   const placed=[];
-   const sorted=snapshot.vehicles.slice().sort((a,b)=>{
-     const i=Number(a.number),j=Number(b.number);
-     return (Number.isFinite(i)?i:99)-(Number.isFinite(j)?j:99);
-   });
-   const features=sorted.map(v=>{
+   const features=snapshot.vehicles.map(v=>{
      vehicles.set(v.id,v);
      const number=["1","2","3"].includes(v.number)?v.number:"unknown";
-     const name=v.name||("Soho Lofts "+number),label=registerTitle(v.id,name);
-     const screen=map.project([v.lon,v.lat]);
-     let lift=0;
-     for(let i=0;i<8;i++){
-       const y=screen.y-19-lift;
-       const rect={left:screen.x-label.width/2,right:screen.x+label.width/2,top:y-label.height,bottom:y};
-       if(!placed.some(p=>rect.left<p.right+6&&rect.right>p.left-6&&rect.top<p.bottom+5&&rect.bottom>p.top-5)){
-         placed.push(rect);break;
-       }
-       lift+=label.height+3;
-     }
      return make([v.lon,v.lat],{
        id:v.id,icon:"bus-"+number,arrow:"arr-"+number,
        heading:v.heading==null?0:v.heading,
-       showArrow:isMoving(v),titleIcon:label.id,labelOffset:[0,-19-lift]
+       showArrow:isMoving(v)
      });
    });
    map.getSource("shuttles").setData(fc(features));
@@ -298,10 +263,6 @@ function mapUI(){
        layout:{"icon-image":["get","icon"],"icon-anchor":"center",
          "icon-rotation-alignment":"viewport",
          "icon-allow-overlap":true,"icon-ignore-placement":true}});
-     map.addLayer({id:"bus-titles",type:"symbol",source:"shuttles",
-       layout:{"icon-image":["get","titleIcon"],"icon-anchor":"bottom",
-         "icon-offset":["array","number",2,["get","labelOffset"]],"icon-rotation-alignment":"viewport",
-         "icon-allow-overlap":true,"icon-ignore-placement":true}});
      map.addSource("stops",{type:"geojson",data:fc([
        make(D.soho,{id:"soho",name:"SoHo Lofts",icon:"soho"}),
        make(D.hob,{id:"hoboken",name:"Hoboken PATH",icon:"hoboken-pin"}),
@@ -315,12 +276,6 @@ function mapUI(){
        selected=f.properties.id;refresh();
      });
      map.on("click","buses",e=>{
-       const f=e.features&&e.features[0];if(!f)return;
-       const v=vehicles.get(f.properties.id);
-       if(v)new maplibregl.Popup({offset:14,maxWidth:"300px"})
-         .setLngLat(f.geometry.coordinates).setHTML(popup(v)).addTo(map);
-     });
-     map.on("click","bus-titles",e=>{
        const f=e.features&&e.features[0];if(!f)return;
        const v=vehicles.get(f.properties.id);
        if(v)new maplibregl.Popup({offset:14,maxWidth:"300px"})
