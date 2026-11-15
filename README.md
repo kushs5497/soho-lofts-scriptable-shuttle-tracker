@@ -64,3 +64,7 @@ syntax checks are not evidence that the WebSocket connects successfully. The sma
 rectangular Home Screen widget continues to display the shuttle timetable, as it
 did before; SignalR changes affect the PATH popups in the map opened by tapping it.
 No always-on background WebSocket is used.
+
+## Launcher update fix (17.5.11)
+
+The launcher now saves newly downloaded `core.js` and its version **before** executing the long-lived map WebView, rather than waiting for the map to be dismissed. It appends a cache-busting query value to GitHub requests, passes the installed version into `core.js` for the map footer, and restores the previous cached copy if the new module throws. **The launcher itself is installed locally in Scriptable, so existing users must manually replace their local launcher once** using this branch’s `SoHo_Shuttle_Launcher.js` file. Keep `const BRANCH = "SignalR";` for testing.
