@@ -97,9 +97,10 @@ async function gps(creds){
 }
 async function imageData(url,svg){try{const r=new Request(url);r.timeoutInterval=10;if(svg){const x=await r.loadString();return "data:image/svg+xml;base64,"+Data.fromString(x).toBase64String();}return "data:image/png;base64,"+Data.fromPNG(await r.loadImage()).toBase64String();}catch(_){return null;}}
 function mapUI(){
- // v17.4.5: station framing reserves top space for logo pins and labels.
+ // Station framing reserves top space for logo pins and labels.
  // No HTML markers, external overlays, transforms, root CSS, or WebView changes.
  const D=window.DATA;
+ document.getElementById("shuttle-version").textContent=String(D.version||"unknown");
  const map=new maplibregl.Map({container:"map",style:"https://tiles.openfreemap.org/styles/positron",center:D.soho,zoom:14.7,attributionControl:false});
  const make=(xy,p)=>({type:"Feature",geometry:{type:"Point",coordinates:xy},properties:p});
  const fc=a=>({type:"FeatureCollection",features:a||[]});
@@ -389,7 +390,7 @@ function mapUI(){
        }else{panel.remove();return;}
        const vv=window.visualViewport,root=document.documentElement,rect=map.getContainer().getBoundingClientRect();
        panel.textContent=[
-         "v17.4.3 · Viewport diagnostics",
+         "v"+String(D.version||"unknown")+" · Viewport diagnostics",
          "Tap this card to close",
          "",
          "screen.height: "+screen.height,
@@ -518,13 +519,40 @@ async function fetchArrivals(station){
    }
  }
 }
+// version.json is the only source of release version information.
+// The existing launcher already fetches it; core reads it as well because
+// installed launchers do not pass version info into imported modules.
+// Offline, use the launcher's locally saved last-successful version.
+async function getAppVersion(){
+ const valid=v=>typeof v==="string"&&/^[0-9]+[.][0-9]+[.][0-9]+$/.test(v);
+ try{
+   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/main/version.json?t="+Date.now());
+   req.timeoutInterval=6;
+   req.headers={"Cache-Control":"no-cache",Accept:"application/json"};
+   const raw=await req.loadString();
+   if(req.response&&req.response.statusCode>=400)throw Error("Version HTTP "+req.response.statusCode);
+   const manifest=JSON.parse(raw);
+   if(!manifest||manifest.entrypoint!=="core.js"||!valid(manifest.version))throw Error("Invalid version manifest");
+   return manifest.version;
+ }catch(e){console.warn("Version manifest unavailable: "+e);}
+ try{
+   const fm=FileManager.local();
+   const path=fm.joinPath(fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime"),"update-state.json");
+   if(fm.fileExists(path)){
+     const state=JSON.parse(fm.readString(path));
+     if(state&&valid(state.version))return state.version;
+   }
+ }catch(e){console.warn("Cached version unavailable: "+e);}
+ return "unknown";
+}
 async function showMap(){
+ const versionPromise=getAppVersion();
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
- const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0};
+ const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,version:await versionPromise};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
  'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-popup{width:290px;color:#15253b;font:13px -apple-system,system-ui,sans-serif}.path-arrival-popup .maplibregl-popup-close-button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:400;color:#334155;border-radius:12px;cursor:pointer}.path-arrival-popup .maplibregl-popup-close-button:active{background:#e2e8f0}.path-heading{font-size:14px;font-weight:700;margin-bottom:8px;padding-right:46px}.path-row{display:flex;align-items:center;gap:8px;min-height:34px;border-top:1px solid #edf0f5}.path-dot{height:8px;width:8px;border-radius:50%;background:#2b82d9;flex-shrink:0}.path-label{flex:1;min-width:0}.path-times{font-size:15px;font-weight:700;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:58px}.path-spinner{display:inline-block;width:12px;height:12px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:11px;color:#718096;border-top:1px solid #edf0f5;padding-top:8px;margin-top:3px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
- '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle departures scheduled · PATH predictions · v17.5.3</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
+ '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle departures scheduled · PATH predictions · v<span id="shuttle-version"></span></small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
  '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';try{('+mapUI.toString()+')();}catch(e){var status=document.getElementById("status");if(status){status.style.display="block";status.textContent="Map startup error: "+String(e);}}</'+'script></body></html>';
  const web=new WebView();await web.loadHTML(html,"https://openfreemap.org/");
  let stop=false,busy=false,timer,pathTimer,pathBusy=false;
