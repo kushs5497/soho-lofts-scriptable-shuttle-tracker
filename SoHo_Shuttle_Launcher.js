@@ -2,10 +2,13 @@
 // Install this script ONCE on the iPhone. Future app updates come from GitHub.
 // icon-color: blue; icon-glyph: bus
 
-const REPO = "https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/main/";
+// Change only this word to switch between production and experiment.
+const BRANCH = "main"; // "main" or "SignalR"
+if (!["main", "SignalR"].includes(BRANCH)) throw Error("Unsupported GitHub branch");
+const REPO = "https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/" + BRANCH + "/";
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const fm = FileManager.local();
-const dir = fm.joinPath(fm.documentsDirectory(), "SoHoShuttleRuntime");
+const dir = fm.joinPath(fm.documentsDirectory(), "SoHoShuttleRuntime-" + BRANCH);
 if (!fm.fileExists(dir)) fm.createDirectory(dir, true);
 const currentPath = fm.joinPath(dir, "core.js");
 const previousPath = fm.joinPath(dir, "previous.js");
@@ -39,7 +42,7 @@ async function runModule(path) {
   if (!app || typeof app.main !== "function") {
     throw new Error("Downloaded module does not export main()");
   }
-  await app.main({ tapURL: URLScheme.forRunningScript() });
+  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH });
 }
 async function showFailure(message) {
   if (config.runsInWidget) {
