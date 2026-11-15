@@ -81,11 +81,14 @@ async function widget(tap){
  const d=w.addText(secondary);d.font=Font.regularSystemFont(10);d.lineLimit=1;d.minimumScaleFactor=.46;
  w.url=tap;w.refreshAfterDate=new Date(Date.now()+300000);return w;
 }
-async function credentials(){
+async function credentials(launcherCredentials){
+ // Local launcher credentials take priority; existing phone Keychain entries still work.
+ const c=launcherCredentials||{};
+ if(typeof c.user==="string"&&c.user.trim()&&typeof c.pass==="string"&&c.pass)
+   return {user:c.user.trim(),pass:c.pass};
  if(Keychain.contains(KEYU)&&Keychain.contains(KEYP))return {user:Keychain.get(KEYU),pass:Keychain.get(KEYP)};
- const a=new Alert();a.title="Set up shuttle GPS";a.addTextField("Verizon username");a.addSecureTextField("Verizon password");a.addAction("Save");a.addCancelAction("Map only");
- if(await a.presentAlert()<0)return null;const user=a.textFieldValue(0).trim(),pass=a.textFieldValue(1);if(!user||!pass)return null;
- Keychain.set(KEYU,user);Keychain.set(KEYP,pass);return {user,pass};
+ console.warn("Shuttle GPS credentials not configured in local launcher.");
+ return null;
 }
 async function request(url,headers){const r=new Request(url);r.headers=headers;r.timeoutInterval=15;let body;try{body=await r.loadString();}catch(e){throw Error(String(e));}const status=r.response&&r.response.statusCode;if(status>=400){const e=Error("HTTP "+status);e.status=status;throw e;}return body;}
 let bearer=null;
@@ -530,9 +533,9 @@ const PATH_SIGNALR_ENDPOINT="https://panynj-path-af-tb.azurewebsites.net/api/tok
 async function pathSignalRSetup(){
  if(Keychain.contains(PATH_SIGNALR_KEY))return;
  const alert=new Alert();
- alert.title="SignalR test credential";
- alert.message="Enter the RidePATH app bearer token once. It remains in this iPhone's Scriptable Keychain, not GitHub. Cancel leaves SignalR unconfigured until the next launch.";
- alert.addSecureTextField("RidePATH app bearer token");
+ alert.title="RidePATH secret token";
+ alert.message="Enter your secret token provided by the widget owner. It will be saved on this iPhone, so you only need to enter it once.";
+ alert.addSecureTextField("Secret token");
  alert.addAction("Save on iPhone");
  alert.addCancelAction("Not now");
  if(await alert.presentAlert()<0)return;
@@ -594,10 +597,10 @@ async function getAppVersion(branch){
  }catch(e){console.warn("Cached version unavailable: "+e);}
  return "unknown";
 }
-async function showMap(version,developerMode,branch){
+async function showMap(version,developerMode,branch,shuttleCredentials){
  const versionPromise=version ? Promise.resolve(version) : getAppVersion(branch);
  await pathSignalRSetup();
- const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
+ const creds=await credentials(shuttleCredentials),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,developerMode:!!developerMode,version:await versionPromise};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
  'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}html,body{background:#fff}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#panel-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}#title{font-weight:bold}#sync-time{font-size:10px;color:#64748b;white-space:nowrap;font-variant-numeric:tabular-nums}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}.maplibregl-ctrl-attrib,.maplibregl-ctrl-attrib-inner{font-size:11px}.maplibregl-ctrl-top-right{top:calc(8px + env(safe-area-inset-top));right:8px}.developer-mode .maplibregl-ctrl-top-right{top:calc(68px + env(safe-area-inset-top))}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-arrival-popup{max-width:calc(100vw - 24px)}.path-arrival-popup .maplibregl-popup-content{box-sizing:border-box;padding:7px 8px;border-radius:10px;max-width:calc(100vw - 24px);max-height:calc(100vh - 80px);overflow-y:auto}.path-popup{width:194px;max-width:calc(100vw - 44px);color:#15253b;font:11.5px -apple-system,system-ui,sans-serif}.path-arrival-popup .maplibregl-popup-close-button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:400;color:#334155;border-radius:12px;cursor:pointer}.path-arrival-popup .maplibregl-popup-close-button:active{background:#e2e8f0}.path-heading{display:flex;align-items:center;min-height:36px;font-size:12px;font-weight:700;margin-bottom:1px;padding-right:42px}.path-row{display:flex;align-items:center;gap:5px;min-height:24px;border-top:1px solid #edf0f5}.path-dot{height:11px;width:11px;border-radius:50%;background:#4D92FB;flex-shrink:0}.path-dot[data-route=blue]{background:#4D92FB}.path-dot[data-route=yellow]{background:#FF9900}.path-dot[data-route=green]{background:#65C100}.path-dot[data-route=split]{background:linear-gradient(145deg,#4D92FB 0%,#4D92FB 45%,#fff 46%,#fff 54%,#FF9900 55%,#FF9900 100%)}.path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.path-times{font-size:12px;font-weight:700;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:43px}.path-spinner{display:inline-block;width:11px;height:11px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:9px;color:#718096;border-top:1px solid #edf0f5;padding-top:5px;margin-top:2px}</style></head><body>'+
@@ -670,5 +673,5 @@ async function showMap(version,developerMode,branch){
  }
  finally{stop=true;if(timer)timer.invalidate();if(pathTimer)pathTimer.invalidate();}
 }
-async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap(options.version,options.developerMode,options.branch);}
+async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap(options.version,options.developerMode,options.branch,options.shuttleCredentials);}
 module.exports.main=main;
