@@ -28,7 +28,8 @@ function readState() {
 }
 function saveState(data) { fm.writeString(statePath, JSON.stringify(data)); }
 async function fetchText(path) {
-  const req = new Request(REPO + path);
+  const separator = path.includes("?") ? "&" : "?";
+  const req = new Request(REPO + path + separator + "_cacheBust=" + Date.now());
   req.timeoutInterval = config.runsInWidget ? 6 : 15;
   req.headers = { "Cache-Control": "no-cache" };
   const body = await req.loadString();
@@ -42,7 +43,7 @@ async function runModule(path) {
   if (!app || typeof app.main !== "function") {
     throw new Error("Downloaded module does not export main()");
   }
-  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH });
+  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH, version: state.version });
 }
 async function showFailure(message) {
   if (config.runsInWidget) {
@@ -93,8 +94,10 @@ if (shouldCheck) {
 }
 
 if (newVersion !== null) {
+  // Install the selected branch's code BEFORE launching its long-lived map.
+  // Otherwise web.present() blocks and version/cache never update until dismissal.
+  const priorState = { ...state };
   try {
-    await runModule(candidatePath);
     if (fm.fileExists(currentPath)) {
       fm.writeString(previousPath, fm.readString(currentPath));
     }
@@ -102,15 +105,22 @@ if (newVersion !== null) {
     fm.remove(candidatePath);
     state.version = newVersion;
     saveState(state);
+    await runModule(currentPath);
   } catch (err) {
     console.warn("New shuttle version failed: " + err);
     try { if (fm.fileExists(candidatePath)) fm.remove(candidatePath); } catch (_) {}
-    state.checkedAt = Date.now() - CHECK_INTERVAL_MS + 60000;
-    saveState(state);
-    if (hasCurrent) {
+    // Roll back only when the newly installed version throws.
+    if (fm.fileExists(previousPath)) {
+      fm.writeString(currentPath, fm.readString(previousPath));
+      state.version = priorState.version || null;
+      state.checkedAt = Date.now() - CHECK_INTERVAL_MS + 60000;
+      saveState(state);
       try { await runModule(currentPath); }
       catch (oldErr) { await showFailure("Both new and cached versions failed: " + oldErr); }
     } else {
+      state.version = null;
+      state.checkedAt = Date.now() - CHECK_INTERVAL_MS + 60000;
+      saveState(state);
       await showFailure("Initial install failed: " + err);
     }
   }
