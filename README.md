@@ -68,3 +68,7 @@ No always-on background WebSocket is used.
 ## Launcher update fix (17.5.11)
 
 The launcher now saves newly downloaded `core.js` and its version **before** executing the long-lived map WebView, rather than waiting for the map to be dismissed. It appends a cache-busting query value to GitHub requests, passes the installed version into `core.js` for the map footer, and restores the previous cached copy if the new module throws. **The launcher itself is installed locally in Scriptable, so existing users must manually replace their local launcher once** using this branch’s `SoHo_Shuttle_Launcher.js` file. Keep `const BRANCH = "SignalR";` for testing.
+
+## Map controls (17.5.14)
+
+Removed the Fit Shuttles button and manual recenter action; the initial automatic map framing remains. The compact required map attribution/info control now sits at the top-right, clear of the bottom shuttle ETA card. In developer mode, the attribution is positioned below the developer GPS diagnostics banner. The SignalR arrival streams and popup behavior are unchanged.
