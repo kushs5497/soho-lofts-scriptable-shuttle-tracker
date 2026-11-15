@@ -580,8 +580,8 @@ async function getAppVersion(){
  }catch(e){console.warn("Cached version unavailable: "+e);}
  return "unknown";
 }
-async function showMap(){
- const versionPromise=getAppVersion();
+async function showMap(version){
+ const versionPromise=version ? Promise.resolve(version) : getAppVersion();
  await pathSignalRSetup();
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,version:await versionPromise};
@@ -636,5 +636,5 @@ async function showMap(){
  }
  finally{stop=true;if(timer)timer.invalidate();if(pathTimer)pathTimer.invalidate();}
 }
-async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap();}
+async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap(options.version);}
 module.exports.main=main;
