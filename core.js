@@ -73,7 +73,11 @@ async function widget(tap){
   else{primary="Service ended";secondary="No eligible departures today";}
  }
  if(title){const x=w.addText(title);x.font=Font.semiboldSystemFont(10);x.lineLimit=1;x.minimumScaleFactor=.55;}
- const p=w.addText(primary);p.font=Font.boldSystemFont(s.dow===0?13:14);p.lineLimit=s.dow===0?2:1;p.minimumScaleFactor=.48;
+ // Compact SF Symbol beside the primary schedule text: phone Sunday, bus otherwise.
+ const primaryRow=w.addStack();primaryRow.layoutHorizontally();primaryRow.centerAlignContent();primaryRow.spacing=4;
+ const symbol=SFSymbol.named(s.dow===0?"phone.fill":"bus.fill");
+ if(symbol){const glyph=primaryRow.addImage(symbol.image);glyph.imageSize=new Size(12,12);glyph.tintColor=Color.dynamic(new Color("#2563eb"),new Color("#93c5fd"));glyph.centerAlignImage();}
+ const p=primaryRow.addText(primary);p.font=Font.boldSystemFont(s.dow===0?13:14);p.lineLimit=s.dow===0?2:1;p.minimumScaleFactor=.48;
  const d=w.addText(secondary);d.font=Font.regularSystemFont(10);d.lineLimit=1;d.minimumScaleFactor=.46;
  w.url=tap;w.refreshAfterDate=new Date(Date.now()+300000);return w;
 }
