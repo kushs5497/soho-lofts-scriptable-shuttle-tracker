@@ -2,7 +2,7 @@
 const NY="America/New_York",SOHO=[-74.0451,40.7332],HOB=[-74.029028,40.73575],NPT=[-74.03476,40.7268];
 const TOKEN="https://fim.api.us.fleetmatics.com/token",PLOTS="https://reveal.us.vzconnect.com/plot/Plot/GetVehiclePlotsForUserWithMetadata";
 const KEYU="soho-lofts-reveal-user-v11",KEYP="soho-lofts-reveal-pass-v11";
-const COLORS={"1":"#2563eb","2":"#e58a22","3":"#64748b","unknown":"#2563eb"};
+const COLORS={moving:"#2563eb",idle:"#eab308",stopped:"#64748b"};
 const SOHO_LOGO="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTkBtP0Tuh9VG-ATuApuApK_5mtOFCwTeisS-y7xZoKZA&s";
 const PATH_LOGO="https://upload.wikimedia.org/wikipedia/commons/f/f3/PATH_logo.svg";
 const OLD_AM=[["06:00",1],["06:10",2],["06:20",1],["06:30",2],["06:40",3],["06:50",1],["07:00",2],["07:10",3],["07:20",1],["07:30",2],["07:40",3],["07:50",1],["08:00",2],["08:10",3],["08:20",1],["08:30",2],["08:40",3],["08:50",1],["09:00",2],["09:10",3],["09:20",1],["09:30",2],["09:45",3],["10:00",2]];
@@ -263,9 +263,9 @@ function mapUI(){
    const bounds=new maplibregl.LngLatBounds();
    [D.soho,D.hob,D.npt].forEach(p=>bounds.extend(p));
    if(includeVehicles&&last)last.vehicles.forEach(v=>bounds.extend([v.lon,v.lat]));
-   // Reserve extra space above the northernmost station, including its
-   // 92px pin/title image, so it clears the GPS card on a shortened WebView.
-   map.fitBounds(bounds,{padding:{top:255,bottom:230,left:55,right:55},maxZoom:15.5,duration});
+   // Keep Hoboken title-box clearance at the top of a shortened WebView.
+   // Add 20px at the right to give PATH labels more breathing room.
+   map.fitBounds(bounds,{padding:{top:255,bottom:230,left:55,right:75},maxZoom:15.5,duration});
  }
  function refresh(){
    document.getElementById("title").textContent=({soho:"SoHo Lofts",hoboken:"Hoboken PATH",newport:"Newport PATH"})[selected];
@@ -293,10 +293,20 @@ function mapUI(){
    }
    return true;
  }
+ function travelState(v){
+   // Engine-off and idling are distinguished only when Reveal reports them.
+   // Without an engine state, a stationary shuttle defaults to stopped/gray.
+   if(!fresh(v))return "stopped";
+   const state=(String(v.status||"")+" "+String(v.iconClass||"")).toLowerCase();
+   if(/idl(e|ing)/.test(state))return "idle";
+   if(/stop|park|ignition[\s_-]*off|engine[\s_-]*off|stationary/.test(state))return "stopped";
+   if(/mov|driv|travel(l)?ing/.test(state))return "moving";
+   if(v.speed!=null&&Number.isFinite(v.speed)&&v.speed>2)return "moving";
+   if(/ignition[\s_-]*on|engine[\s_-]*on|engine[\s_-]*running/.test(state))return "idle";
+   return "stopped";
+ }
  function isMoving(v){
-   const status=String(v.iconClass||v.status||"").toLowerCase();
-   return fresh(v)&&!status.includes("idle")&&!status.includes("stop")&&
-      v.speed!=null&&v.speed>2&&v.heading!=null&&Number.isFinite(v.heading);
+   return travelState(v)==="moving"&&v.heading!=null&&Number.isFinite(v.heading);
  }
  function updateVehicles(snapshot){
    last=snapshot;
@@ -305,8 +315,9 @@ function mapUI(){
    const features=snapshot.vehicles.map(v=>{
      vehicles.set(v.id,v);
      const number=["1","2","3"].includes(v.number)?v.number:"unknown";
+     const state=travelState(v);
      return make([v.lon,v.lat],{
-       id:v.id,icon:"bus-"+number,arrow:"arr-"+number,
+       id:v.id,icon:"bus-"+number+"-"+state,arrow:"arr-moving",
        heading:v.heading==null?0:v.heading,
        showArrow:isMoving(v)
      });
@@ -326,10 +337,12 @@ function mapUI(){
      map.addImage("hoboken-pin",pin(logos[1],"PATH","Hoboken PATH"),{pixelRatio:2});
      map.addImage("newport-pin",pin(logos[1],"PATH","Newport PATH"),{pixelRatio:2});
      for(const number of ["1","2","3","unknown"]){
-       const color=D.colors[number];
-       map.addImage("bus-"+number,bus(number==="unknown"?"?":number,color),{pixelRatio:2});
-       map.addImage("arr-"+number,arrow(color),{pixelRatio:2});
+       for(const state of ["moving","idle","stopped"]){
+         map.addImage("bus-"+number+"-"+state,
+           bus(number==="unknown"?"?":number,D.colors[state]),{pixelRatio:2});
+       }
      }
+     map.addImage("arr-moving",arrow(D.colors.moving),{pixelRatio:2});
      map.addSource("shuttles",{type:"geojson",data:fc()});
      map.addLayer({id:"arrows",type:"symbol",source:"shuttles",
        filter:["==",["get","showArrow"],true],
