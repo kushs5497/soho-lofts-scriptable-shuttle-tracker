@@ -13,8 +13,15 @@ const candidatePath = fm.joinPath(dir, "candidate.js");
 const statePath = fm.joinPath(dir, "update-state.json");
 
 function readState() {
-  try { return JSON.parse(fm.readString(statePath)); }
-  catch (_) { return {}; }
+  try {
+    if (!fm.fileExists(statePath)) return {};
+    const saved = JSON.parse(fm.readString(statePath));
+    return saved && typeof saved === "object" && !Array.isArray(saved)
+      ? saved
+      : {};
+  } catch (_) {
+    return {};
+  }
 }
 function saveState(data) { fm.writeString(statePath, JSON.stringify(data)); }
 async function fetchText(path) {
