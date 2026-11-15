@@ -7,6 +7,14 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}html,bo
 #panel{max-width:580px;margin:0 auto}
 @media(min-width:800px){#panel{left:20px;right:auto;width:360px}}
 
+
+/* Match iOS map typography on Android and desktop (no unsupported lone -apple-system). */
+html,body,#map,#panel,#panel button,.path-arrival-popup,.path-popup,.vehicle-map-popup,.vehicle-card,#shuttle-map-controls,#shuttle-map-attribution{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif!important}
+#panel{font-size:12px;line-height:1.4}
+#title{font-size:14px;line-height:1.3;font-weight:700}
+#tabs button{font-family:inherit!important;font-size:12px;font-weight:500;line-height:1.3}
+#departures{font-size:12px;line-height:1.5}
+#panel>small{display:block;margin-top:7px;font-size:10px;color:#77808f}
 </style></head><body>
 <div id="map"></div><div id="status">Loading map…</div><span id="gps" style="display:none"></span><div id="panel"><div id="panel-heading"><div id="title">SoHo Lofts</div><div id="sync-time">Waiting for GPS…</div></div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle ETA · PATH predictions · web</small></div><span id="shuttle-version" hidden></span>
 <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script><script>
@@ -594,7 +602,18 @@ window.DATA={
   colors:COLORS,events:day.events,sunday:day.dow===0,
   version:"web",developerMode:false
 };
-mapUI();
+// Before creating the map, load the real branding assets through the same-origin
+// Vercel API. The map's canvas-based pins and PATH popup reuse these data URIs.
+async function startMap(){
+  try{
+    const response=await fetchJSON("/api/live?kind=logos");
+    if(Array.isArray(response.logos)&&response.logos.length===2&&
+       response.logos.every(x=>typeof x==="string"&&x.startsWith("data:image/")))
+      window.DATA.logos=response.logos;
+  }catch(error){console.warn("Logo fallback in use:",error.message);}
+  mapUI();
+}
+startMap();
 const endpoint="/api/live";
 const streams=[["HOB","New York","ToNY,HOB"],["NEW","New York","ToNY,NEW"],["NEW","New Jersey","ToNJ,NEW"]];
 const nextAttempt=Object.create(null);
