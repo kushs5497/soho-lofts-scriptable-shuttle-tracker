@@ -10,7 +10,7 @@ iPhone Lock Screen widget and live shuttle GPS map with MapLibre, OpenFreeMap Po
 5. Keep the launcher. Future changes come from this GitHub repository.
 
 ## Updating
-The launcher checks GitHub when you open the map and approximately every 15 minutes when the widget next runs (subject to iOS refresh behavior). It caches the previous working script and falls back when offline. Whenever `core.js` is updated, increment the version in `version.json` too. Changes may require closing and reopening the map.
+The launcher checks GitHub when you open the map and approximately every 15 minutes when the widget next runs (subject to iOS refresh behavior). It caches the previous working script and falls back when offline. Whenever `core.js` is updated, increment the version in `version.json` too. The map footer and viewport diagnostic read the version from `version.json` rather than maintaining separate hardcoded version labels. If GitHub is unreachable, the map uses the launcher's locally cached version. Changes may require closing and reopening the map.
 
 ## Widget parameter
 `auto` (default), `soho`, `hoboken`, `newport`, or `all`.
