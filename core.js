@@ -114,89 +114,153 @@ function mapUI(){
    newport:[["33S","33rd Street","yellow"],["WTC","World Trade Center","green"],
             ["JSQ","Journal Square","yellow"],["HOB","Hoboken","blue"]]
  };
- function resetPathDotColors(){
-   if(!pathPopup||!activePathStation)return;
-   const defaults=PATH_ROWS[activePathStation]||[];
-   pathPopup.getElement().querySelectorAll(".path-row").forEach(el=>{
-     const times=el.querySelector(".path-times"),dot=el.querySelector(".path-dot");
-     if(!times||!dot)return;
-     const item=defaults.find(row=>row[0]===times.dataset.destination);
-     dot.dataset.route=item?item[2]:"blue";
-   });
+ // Three long-lived WebSockets populate shared cache; popup opens never request data.
+ const PATH_STREAMS=["ToNY,HOB","ToNY,NEW","ToNJ,NEW"];
+ const pathSnapshots={},pathStates={},pathSockets={};
+ let pathPopup=null,activePathStation=null;
+ function pathDest(headSign){
+   const h=String(headSign||"").trim().toLowerCase();
+   if(/^33(?:rd)?(?:\s*(?:st|street))?\b/.test(h))return "33S";
+   if(/^(?:world\s+trade\s+center|wtc)\b/.test(h))return "WTC";
+   if(/^(?:journal\s+square|jsq)\b/.test(h))return "JSQ";
+   if(/^hoboken\b/.test(h))return "HOB";
+   return null;
  }
- let pathPopup=null,activePathStation=null,pathRequest=null,pathRequestId=0;
- function pathLoading(){
-   if(!pathPopup)return;
-   resetPathDotColors();
-   pathPopup.getElement().querySelectorAll(".path-times").forEach(el=>{
-     el.textContent="";
-     const spinner=document.createElement("span");
-     spinner.className="path-spinner";
-     spinner.setAttribute("aria-label","Loading live arrival times");
-     el.appendChild(spinner);
-   });
-   const note=pathPopup.getElement().querySelector(".path-note");
-   if(note)note.textContent="Fetching live PATH arrivals…";
+ function pathColor(train,dest){
+   const raw=Array.isArray(train.lineColor)?train.lineColor.join(","):String(train.lineColor||"");
+   const color=raw.toUpperCase().replace(/[^A-F0-9,]/g,"");
+   const route=String(train.route||"").toUpperCase();
+   const head=String(train.headSign||"").toLowerCase();
+   if(dest==="WTC")return "green";
+   if(route.includes("JSQ_33_HOB")||head.includes("via hoboken")||(color.includes("4D92FB")&&color.includes("FF9900")))return "split";
+   if(color.includes("65C100")||route.includes("HOB_WTC"))return "green";
+   if(color.includes("4D92FB")||route.includes("HOB_33"))return "blue";
+   if(color.includes("FF9900")||route.includes("JSQ_33"))return "yellow";
+   return null;
  }
- function askPathRefresh(){
+ function updatePathPopup(){
    if(!pathPopup||!activePathStation)return;
-   pathLoading();
-   pathRequest={id:++pathRequestId,station:activePathStation};
+   const node=pathPopup.getElement();if(!node)return;
+   const now=Date.now(),code=activePathStation==="hoboken"?"HOB":"NEW";
+   const closest={};let latest=0,connected=false;
+   for(const key of PATH_STREAMS){
+     if(!key.endsWith(","+code))continue;
+     if(pathStates[key]&&pathStates[key].status==="connected")connected=true;
+     const snap=pathSnapshots[key];
+     if(!snap||now-snap.receivedAt>90000)continue;
+     for(const train of snap.messages){
+       if(!train)continue;
+       const dest=pathDest(train.headSign);
+       if(!(PATH_ROWS[activePathStation]||[]).some(r=>r[0]===dest))continue;
+       const updated=Date.parse(String(train.lastUpdated||"")),secs=Number(train.secondsToArrival);
+       if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000||!Number.isFinite(secs)||secs<0||secs>7200)continue;
+       const arrival=updated+secs*1000;
+       if(arrival<now-30000||arrival>now+7200000)continue;
+       latest=Math.max(latest,updated);
+       if(!closest[dest]||arrival<closest[dest].arrival)closest[dest]={arrival,color:pathColor(train,dest)};
+     }
+   }
+   node.querySelectorAll(".path-times").forEach(el=>{
+     const train=closest[el.dataset.destination];
+     const remain=train?train.arrival-now:null;
+     const value=remain==null?"—":remain<=35000?"Now":Math.max(1,Math.ceil(remain/60000))+" min";
+     if(el.textContent!==value)el.textContent=value;
+     const dot=el.parentNode&&el.parentNode.querySelector(".path-dot");
+     if(dot&&train&&["blue","yellow","green","split"].includes(train.color))dot.dataset.route=train.color;
+   });
+   const note=node.querySelector(".path-note");
+   if(note){
+     const label=latest?"RidePATH SignalR · Updated "+new Date(latest).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}):
+       connected?"Waiting for live PATH arrivals…":"Connecting to RidePATH SignalR…";
+     if(note.textContent!==label)note.textContent=label;
+   }
  }
  function openPathPopup(feature){
    const station=feature.properties.id;
    if(!PATH_ROWS[station])return;
    if(pathPopup)pathPopup.remove();
    activePathStation=station;
-   const card=document.createElement("div");
-   card.className="path-popup";
-   const title=document.createElement("div");
-   title.className="path-heading";
-   title.textContent=(station==="hoboken"?"Hoboken":"Newport")+" PATH";
-   card.appendChild(title);
-   PATH_ROWS[station].forEach(([id,name,routeColor])=>{
+   const card=document.createElement("div");card.className="path-popup";
+   const title=document.createElement("div");title.className="path-heading";
+   title.textContent=(station==="hoboken"?"Hoboken":"Newport")+" PATH";card.appendChild(title);
+   PATH_ROWS[station].forEach(([id,name,color])=>{
      const row=document.createElement("div");row.className="path-row";
-     const dot=document.createElement("span");dot.className="path-dot";dot.dataset.route=routeColor;
+     const dot=document.createElement("span");dot.className="path-dot";dot.dataset.route=color;
      const label=document.createElement("span");label.className="path-label";label.textContent=name;
-     const times=document.createElement("span");times.className="path-times";
-     times.dataset.destination=id;
+     const times=document.createElement("span");times.className="path-times";times.dataset.destination=id;times.textContent="—";
      row.appendChild(dot);row.appendChild(label);row.appendChild(times);card.appendChild(row);
    });
    const note=document.createElement("div");note.className="path-note";card.appendChild(note);
-   card.addEventListener("click",()=>{if(activePathStation===station)askPathRefresh();});
    const popupObj=new maplibregl.Popup({offset:12,maxWidth:"calc(100vw - 24px)",closeOnClick:false,className:"path-arrival-popup"})
      .setLngLat(feature.geometry.coordinates).setDOMContent(card).addTo(map);
    pathPopup=popupObj;
-   popupObj.on("close",()=>{
-     if(pathPopup===popupObj){pathPopup=null;activePathStation=null;pathRequest=null;}
-   });
-   askPathRefresh();
+   popupObj.on("close",()=>{if(pathPopup===popupObj){pathPopup=null;activePathStation=null;}});
+   updatePathPopup();
  }
- window.takePathStationRequest=()=>{const r=pathRequest;pathRequest=null;return r;};
- window.receivePathStationData=payload=>{
-   if(!payload||!pathPopup||payload.id!==pathRequestId||payload.station!==activePathStation)return;
-   const element=pathPopup.getElement(),note=element.querySelector(".path-note");
-   if(payload.error){
-     element.querySelectorAll(".path-times").forEach(x=>x.textContent="—");
-     note.textContent="Live times unavailable. Tap to retry.";
-     return;
+ // Native Scriptable prepares fresh negotiation URLs only for disconnected streams.
+ window.pathStreamHealth=()=>{
+   const now=Date.now();
+   return PATH_STREAMS.filter(key=>{
+     const state=pathStates[key];
+     if(!state)return true;
+     if(state.status==="connecting"&&now-state.started<25000)return false;
+     if(state.status==="connected"&&now-state.lastMessage<90000)return false;
+     return true;
+   });
+ };
+ window.pathStreamFailure=(key,error)=>{
+   if(!PATH_STREAMS.includes(key))return;
+   pathStates[key]={status:"error",started:Date.now(),lastMessage:0,error:String(error)};
+   updatePathPopup();
+ };
+ window.pathInstallStreams=feeds=>{
+   for(const feed of feeds){
+     if(!feed||!PATH_STREAMS.includes(feed.expected)||typeof feed.url!=="string")continue;
+     const key=feed.expected,old=pathSockets[key];
+     if(old){try{old.close();}catch(_){}}
+     const state={status:"connecting",started:Date.now(),lastMessage:0,error:null};
+     pathStates[key]=state;
+     let ws;
+     try{ws=new WebSocket(feed.url);}
+     catch(err){state.status="error";state.error=String(err);continue;}
+     pathSockets[key]=ws;
+     ws.onopen=()=>{
+       if(pathSockets[key]!==ws)return;
+       state.status="connected";state.lastMessage=Date.now();
+       ws.send(JSON.stringify({protocol:"json",version:1})+String.fromCharCode(30));
+       updatePathPopup();
+     };
+     ws.onerror=()=>{
+       if(pathSockets[key]!==ws)return;
+       state.status="error";state.error="WebSocket error";updatePathPopup();
+     };
+     ws.onclose=e=>{
+       if(pathSockets[key]!==ws)return;
+       state.status="closed";state.error="WebSocket closed "+e.code;updatePathPopup();
+     };
+     ws.onmessage=event=>{
+       if(pathSockets[key]!==ws||typeof event.data!=="string")return;
+       for(const frame of event.data.split(String.fromCharCode(30))){
+         if(!frame)continue;
+         try{
+           const msg=JSON.parse(frame);
+           if(msg.error){state.status="error";state.error=String(msg.error);ws.close();continue;}
+           if(msg.target!=="SendMessage")continue;
+           const args=msg.arguments||[];
+           if(args.length<2||!String(args[0]).endsWith(","+key))continue;
+           const payload=typeof args[1]==="string"?JSON.parse(args[1]):args[1];
+           if(!payload||payload.target!==feed.code||!Array.isArray(payload.messages))continue;
+           pathSnapshots[key]={messages:payload.messages,receivedAt:Date.now()};
+           state.status="connected";state.lastMessage=Date.now();state.error=null;
+           updatePathPopup();
+         }catch(err){state.error=String(err);}
+       }
+     };
    }
-   const d=payload.result||{};
-   const rows=Array.isArray(d.rows)?d.rows:[];
-   const byId={};rows.forEach(r=>{byId[r.id]=r;});
-   element.querySelectorAll(".path-times").forEach(el=>{
-     const row=byId[el.dataset.destination];
-     el.textContent=row&&row.times&&row.times.length?row.times[0]:"—";
-     // Change the circle only when a fresh train prediction identifies a line.
-     const dot=el.parentNode&&el.parentNode.querySelector(".path-dot");
-     if(dot&&row&&row.times&&row.times.length&&
-         ["blue","yellow","green","split"].includes(row.routeColor))
-       dot.dataset.route=row.routeColor;
-   });
-   note.textContent=(d.source?d.source+" · ":"")+(d.updatedAt?"Updated "+new Date(d.updatedAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):"No current predictions");
- }
- setInterval(()=>{if(activePathStation)askPathRefresh();},30000);
-
+   updatePathPopup();
+ };
+ // Local second-by-second countdown; never refetch or show a loading spinner.
+ setInterval(updatePathPopup,1000);
 
  function safe(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
  function decode(uri){return new Promise(ok=>{if(!uri)return ok(null);const i=new Image();i.onload=()=>ok(i);i.onerror=()=>ok(null);i.src=uri;});}
@@ -446,15 +510,9 @@ function mapUI(){
 // station-specific API may be tried once as a best-effort fallback.
 // Neither source is assumed to be live unless timestamps confirm freshness.
 const PATH_CODES={hoboken:"HOB",newport:"NEW"};
-const PATH_DEST={
- HOB:[{id:"33S",name:"33rd Street"},{id:"WTC",name:"World Trade Center"}],
- NEW:[{id:"33S",name:"33rd Street"},{id:"WTC",name:"World Trade Center"},
-      {id:"JSQ",name:"Journal Square"},{id:"HOB",name:"Hoboken"}]
-};
 // Experimental RidePATH SignalR client. No app credential is stored in GitHub.
 const PATH_SIGNALR_KEY="soho-path-signalr-app-token-v1";
 const PATH_SIGNALR_ENDPOINT="https://panynj-path-af-tb.azurewebsites.net/api/tokenrequest?TKrTIgWSdgikIrqvftckyOh";
-const PATH_SIGNALR_LISTEN_MS=13000;
 async function pathSignalRSetup(){
  if(Keychain.contains(PATH_SIGNALR_KEY))return;
  const alert=new Alert();
@@ -496,113 +554,6 @@ async function pathSignalRConnectParams(code,direction){
  return {code,direction,expected:(direction==="New York"?"ToNY":"ToNJ")+","+code,
    url:wsUrl+sep+"id="+encodeURIComponent(info.connectionToken)+"&access_token="+encodeURIComponent(auth.AccessToken)};
 }
-async function pathSignalRArrivals(station,web){
- if(!web||!Keychain.contains(PATH_SIGNALR_KEY))throw Error("SignalR unconfigured");
- const code=PATH_CODES[station];
- const dirs=code==="HOB"?["New York"]:["New York","New Jersey"];
- // Acquire tokens and negotiate independent streams concurrently.
- const settled=await Promise.allSettled(dirs.map(d=>pathSignalRConnectParams(code,d)));
- const connections=settled.filter(x=>x.status==="fulfilled").map(x=>x.value);
- if(!connections.length)throw Error("No SignalR negotiation succeeded: "+
-   settled.map(x=>String(x.reason)).join("; "));
- // Browser WebSocket cannot set Authorization headers. Azure SignalR supports
- // access_token in the query for WebSocket browser clients.
- const browserCode="(function(){"+
-   "const feeds="+JSON.stringify(connections)+";"+
-   "const limit="+PATH_SIGNALR_LISTEN_MS+";"+
-   "function one(feed){return new Promise(resolve=>{let done=false;let sock=null;"+
-   "const finish=(value)=>{if(done)return;done=true;clearTimeout(timeout);"+
-   "try{if(sock)sock.close();}catch(_){}resolve(value);};"+
-   "const timeout=setTimeout(()=>finish({error:'timeout',feed:feed.expected}),limit);"+
-   "try{sock=new WebSocket(feed.url);}catch(e){finish({error:String(e),feed:feed.expected});return;}"+
-   "sock.onopen=()=>sock.send(JSON.stringify({protocol:'json',version:1})+String.fromCharCode(30));"+
-   "sock.onerror=()=>finish({error:'websocket error',feed:feed.expected});"+
-   "sock.onclose=()=>finish({error:'websocket closed',feed:feed.expected});"+
-   "sock.onmessage=(event)=>{if(typeof event.data!=='string')return;"+
-   "for(const part of event.data.split(String.fromCharCode(30))){if(!part)continue;"+
-   "try{const msg=JSON.parse(part);if(msg.target!=='SendMessage')continue;"+
-   "const a=msg.arguments||[];if(a.length<2||!String(a[0]).endsWith(','+feed.expected))continue;"+
-   "const p=typeof a[1]==='string'?JSON.parse(a[1]):a[1];"+
-   "if(!p||p.target!==feed.code||!Array.isArray(p.messages))continue;"+
-   "finish({feed:feed.expected,payload:p});return;}catch(_){}"+
-   "}};});}"+
-   "Promise.all(feeds.map(one)).then(result=>completion(result)).catch(err=>completion([{error:String(err)}]));"+
-   "})()";
- const snapshots=await web.evaluateJavaScript(browserCode,true);
- if(!Array.isArray(snapshots))throw Error("Invalid SignalR WebView response");
- const rows=pathBuildRows(code),now=Date.now();
- let latest=0,streams=0;
- for(const snap of snapshots){
-   if(!snap||!snap.payload)continue;
-   streams++;
-   for(const train of snap.payload.messages){
-     if(!train)continue;
-     const updated=Date.parse(String(train.lastUpdated||""));
-     const seconds=Number(train.secondsToArrival);
-     if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000||
-       !Number.isFinite(seconds)||seconds<0||seconds>7200)continue;
-     latest=Math.max(latest,updated);
-     pathSetSoonest(rows,train.headSign,updated+seconds*1000,now,train.lineColor,train.route);
-   }
- }
- if(!streams||!rows.some(x=>x.times.length)){
-   const errors=snapshots.map(x=>x.error||"no usable arrivals").join("; ");
-   throw Error("SignalR no usable trains: "+errors);
- }
- return pathResult(code,rows,"RidePATH SignalR",latest);
-}
-
-function pathDestination(text){
- const s=String(text||"").trim().toLowerCase();
- if(/^33(?:rd)?(?:\s*(?:st|street))?\b/.test(s))return "33S";
- if(/^world\s+trade\s+center\b|^wtc\b/.test(s))return "WTC";
- if(/^journal\s+square\b|^jsq\b/.test(s))return "JSQ";
- if(/^hoboken\b/.test(s))return "HOB";
- return null;
-}
-function pathEtaText(eta,now){
- const remaining=(eta-now)/1000;
- if(!Number.isFinite(remaining)||remaining < -30||remaining > 7200)return null;
- return remaining<=35?"Now":Math.max(1,Math.ceil(remaining/60))+" min";
-}
-function pathBuildRows(code){return PATH_DEST[code].map(r=>({id:r.id,name:r.name,times:[],at:Infinity}));}
-function pathTrainColor(headsign,lineColor,routeId,destination){
- // Official RidePATH lineColor identifies blue, yellow, green, and the
- // blue/yellow service, independently of the destination/headsign.
- // The community feed instead provides lineColors[] and a route ID.
- const colors=Array.isArray(lineColor)?lineColor.join(","):String(lineColor||"");
- const compact=colors.replace(/[^a-fA-F0-9,]/g,"").toUpperCase();
- const route=String(routeId||"").toUpperCase();
- const text=String(headsign||"").toLowerCase();
- if(destination==="WTC")return "green";
- if(route.includes("JSQ_33_HOB")||(/via\s+hoboken/i).test(text)||
-     (compact.includes("4D92FB")&&compact.includes("FF9900")))
-   return "split";
- if(route.includes("HOB_WTC")||compact.includes("65C100"))return "green";
- if(route.includes("HOB_33")||compact.includes("4D92FB"))return "blue";
- if(route.includes("JSQ_33")||compact.includes("FF9900"))return "yellow";
- return null; // The popup keeps its station-specific color when unknown.
-}
-function pathSetSoonest(rows,headsign,arrival,now,lineColor,routeId){
- const id=pathDestination(headsign);
- if(!id)return;
- const row=rows.find(r=>r.id===id);
- const text=pathEtaText(arrival,now);
- if(row && text && arrival < row.at){
-   row.at=arrival;row.times=[text];
-   row.routeColor=pathTrainColor(headsign,lineColor,routeId,id);
- }
-}
-function pathResult(code,rows,source,updatedAt){
- // The map displays one countdown and a line-colored circle per destination.
- return {station:code,rows:rows.map(r=>({
-   id:r.id,name:r.name,times:r.times,routeColor:r.routeColor||null
- })),updatedAt,source,status:"Live arrival predictions"};
-}
-async function fetchArrivals(station,web){
- if(!PATH_CODES[station])throw Error("Unknown PATH station");
- return await pathSignalRArrivals(station,web);
-}
 // version.json is the only source of release version information.
 // The existing launcher already fetches it; core reads it as well because
 // installed launchers do not pass version info into imported modules.
@@ -641,29 +592,45 @@ async function showMap(){
  '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';try{('+mapUI.toString()+')();}catch(e){var status=document.getElementById("status");if(status){status.style.display="block";status.textContent="Map startup error: "+String(e);}}</'+'script></body></html>';
  const web=new WebView();await web.loadHTML(html,"https://openfreemap.org/");
  let stop=false,busy=false,timer,pathTimer,pathBusy=false;
- async function pollPath(){
-   if(stop||pathBusy)return;
-   let q;
-   try{
-     q=await web.evaluateJavaScript("window.takePathStationRequest && window.takePathStationRequest()",false);
-   }catch(_){return;}
-   if(!q||!["hoboken","newport"].includes(q.station))return;
+ const FEEDS=[
+   ["HOB","New York","ToNY,HOB"],
+   ["NEW","New York","ToNY,NEW"],
+   ["NEW","New Jersey","ToNJ,NEW"]
+ ];
+ const retryAfter={};
+ async function maintainPathStreams(){
+   if(stop||pathBusy||!Keychain.contains(PATH_SIGNALR_KEY))return;
    pathBusy=true;
    try{
-     const data=await fetchArrivals(q.station,web);
-     if(!stop)await web.evaluateJavaScript("window.receivePathStationData && window.receivePathStationData("+JSON.stringify({id:q.id,station:q.station,result:data})+")",false);
-   }catch(e){
-     if(!stop)try{
-       await web.evaluateJavaScript("window.receivePathStationData && window.receivePathStationData("+JSON.stringify({id:q.id,station:q.station,error:String(e)})+")",false);
-     }catch(_){}
-   }finally{pathBusy=false;}
+     const keys=await web.evaluateJavaScript("window.pathStreamHealth ? window.pathStreamHealth() : []",false);
+     if(!Array.isArray(keys))return;
+     const now=Date.now();
+     const due=FEEDS.filter(f=>keys.includes(f[2])&&now>=(retryAfter[f[2]]||0));
+     if(!due.length)return;
+     // Independent tokens, negotiation and WebSockets; failure of one does not block others.
+     due.forEach(f=>{retryAfter[f[2]]=now+30000;});
+     const prepared=await Promise.allSettled(due.map(f=>pathSignalRConnectParams(f[0],f[1])));
+     for(let i=0;i<prepared.length;i++){
+       const result=prepared[i],key=due[i][2];
+       if(stop)return;
+       if(result.status==="fulfilled"){
+         const conn=result.value;
+         await web.evaluateJavaScript("window.pathInstallStreams && window.pathInstallStreams("+JSON.stringify([conn])+")",false);
+       }else{
+         const error=String(result.reason);
+         console.warn("SignalR "+key+": "+error);
+         await web.evaluateJavaScript("window.pathStreamFailure && window.pathStreamFailure("+JSON.stringify(key)+","+JSON.stringify(error)+")",false);
+       }
+     }
+   }catch(err){console.warn("SignalR stream manager: "+err);}
+   finally{pathBusy=false;}
  }
  async function poll(){if(!creds||stop||busy)return;busy=true;try{const s=await gps(creds);if(!stop)await web.evaluateJavaScript("window.receiveVehicleData && window.receiveVehicleData("+JSON.stringify(s)+")",false);}catch(e){if(!stop)try{await web.evaluateJavaScript("window.receiveVehicleError && window.receiveVehicleError("+JSON.stringify(String(e))+")",false);}catch(_){}}finally{busy=false;}}
  const dismissed=web.present(true);
  try{
-   // Keep PATH polling entirely separate from map startup. The polling
-   // bridge becomes active only after the WebView has had time to render.
-   pathTimer=Timer.schedule(2500,true,()=>{pollPath().catch(e=>console.warn("PATH: "+e));});
+   // Connect all three streams on map launch; monitor only for disconnected streams.
+   pathTimer=Timer.schedule(25000,true,()=>{maintainPathStreams().catch(e=>console.warn("PATH: "+e));});
+   maintainPathStreams().catch(e=>console.warn("PATH: "+e));
    if(creds){timer=Timer.schedule(5000,true,()=>{poll().catch(e=>console.warn(e));});poll().catch(e=>console.warn(e));}
    await dismissed;
  }
