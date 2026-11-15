@@ -300,7 +300,7 @@ function mapUI(){
          "icon-allow-overlap":true,"icon-ignore-placement":true}});
      map.addLayer({id:"bus-titles",type:"symbol",source:"shuttles",
        layout:{"icon-image":["get","titleIcon"],"icon-anchor":"bottom",
-         "icon-offset":["get","labelOffset"],"icon-rotation-alignment":"viewport",
+         "icon-offset":["array","number",2,["get","labelOffset"]],"icon-rotation-alignment":"viewport",
          "icon-allow-overlap":true,"icon-ignore-placement":true}});
      map.addSource("stops",{type:"geojson",data:fc([
        make(D.soho,{id:"soho",name:"SoHo Lofts",icon:"soho"}),
