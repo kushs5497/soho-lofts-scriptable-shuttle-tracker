@@ -5,6 +5,10 @@
 // Any GitHub branch name can be used here; main is the default.
 const BRANCH = "main";
 const DEVELOPER_MODE = false; // true enables diagnostics and expanded map credits
+// Optional credentials: fill in ONLY in your local iPhone launcher.
+// Never commit real credentials to this public repository.
+const SHUTTLE_USERNAME = "";
+const SHUTTLE_PASSWORD = "";
 const REPO = "https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/" + encodeURIComponent(BRANCH) + "/";
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const fm = FileManager.local();
@@ -43,7 +47,7 @@ async function runModule(path) {
   if (!app || typeof app.main !== "function") {
     throw new Error("Downloaded module does not export main()");
   }
-  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH, version: state.version, developerMode: DEVELOPER_MODE });
+  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH, version: state.version, developerMode: DEVELOPER_MODE, shuttleCredentials: { user: SHUTTLE_USERNAME, pass: SHUTTLE_PASSWORD } });
 }
 async function showFailure(message) {
   if (config.runsInWidget) {
