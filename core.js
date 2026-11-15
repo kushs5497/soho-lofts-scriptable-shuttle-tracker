@@ -108,14 +108,26 @@ function mapUI(){
  const vehicles=new Map();
  // Station predictions live in a separate Scriptable-native module.
  // The WebView only renders the popup; it never fetches cross-origin data.
+ // Third value is the default route dot color when no live train is reported.
  const PATH_ROWS={
-   hoboken:[["33S","33rd Street"],["WTC","World Trade Center"]],
-   newport:[["33S","33rd Street"],["WTC","World Trade Center"],
-            ["JSQ","Journal Square"],["HOB","Hoboken"]]
+   hoboken:[["33S","33rd Street","blue"],["WTC","World Trade Center","green"]],
+   newport:[["33S","33rd Street","yellow"],["WTC","World Trade Center","green"],
+            ["JSQ","Journal Square","yellow"],["HOB","Hoboken","blue"]]
  };
+ function resetPathDotColors(){
+   if(!pathPopup||!activePathStation)return;
+   const defaults=PATH_ROWS[activePathStation]||[];
+   pathPopup.getElement().querySelectorAll(".path-row").forEach(el=>{
+     const times=el.querySelector(".path-times"),dot=el.querySelector(".path-dot");
+     if(!times||!dot)return;
+     const item=defaults.find(row=>row[0]===times.dataset.destination);
+     dot.dataset.route=item?item[2]:"blue";
+   });
+ }
  let pathPopup=null,activePathStation=null,pathRequest=null,pathRequestId=0;
  function pathLoading(){
    if(!pathPopup)return;
+   resetPathDotColors();
    pathPopup.getElement().querySelectorAll(".path-times").forEach(el=>{
      el.textContent="";
      const spinner=document.createElement("span");
@@ -142,9 +154,9 @@ function mapUI(){
    title.className="path-heading";
    title.textContent=(station==="hoboken"?"Hoboken":"Newport")+" PATH";
    card.appendChild(title);
-   PATH_ROWS[station].forEach(([id,name])=>{
+   PATH_ROWS[station].forEach(([id,name,routeColor])=>{
      const row=document.createElement("div");row.className="path-row";
-     const dot=document.createElement("span");dot.className="path-dot";
+     const dot=document.createElement("span");dot.className="path-dot";dot.dataset.route=routeColor;
      const label=document.createElement("span");label.className="path-label";label.textContent=name;
      const times=document.createElement("span");times.className="path-times";
      times.dataset.destination=id;
@@ -175,6 +187,11 @@ function mapUI(){
    element.querySelectorAll(".path-times").forEach(el=>{
      const row=byId[el.dataset.destination];
      el.textContent=row&&row.times&&row.times.length?row.times[0]:"—";
+     // Change the circle only when a fresh train prediction identifies a line.
+     const dot=el.parentNode&&el.parentNode.querySelector(".path-dot");
+     if(dot&&row&&row.times&&row.times.length&&
+         ["blue","yellow","green","split"].includes(row.routeColor))
+       dot.dataset.route=row.routeColor;
    });
    note.textContent=(d.source?d.source+" · ":"")+(d.updatedAt?"Updated "+new Date(d.updatedAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):"No current predictions");
  }
@@ -451,17 +468,38 @@ function pathEtaText(eta,now){
  return remaining<=35?"Now":Math.max(1,Math.ceil(remaining/60))+" min";
 }
 function pathBuildRows(code){return PATH_DEST[code].map(r=>({id:r.id,name:r.name,times:[],at:Infinity}));}
-function pathSetSoonest(rows,headsign,arrival,now){
+function pathTrainColor(headsign,lineColor,routeId,destination){
+ // Official RidePATH lineColor identifies blue, yellow, green, and the
+ // blue/yellow service, independently of the destination/headsign.
+ // The community feed instead provides lineColors[] and a route ID.
+ const colors=Array.isArray(lineColor)?lineColor.join(","):String(lineColor||"");
+ const compact=colors.replace(/[^a-fA-F0-9,]/g,"").toUpperCase();
+ const route=String(routeId||"").toUpperCase();
+ const text=String(headsign||"").toLowerCase();
+ if(destination==="WTC")return "green";
+ if(route.includes("JSQ_33_HOB")||(/via\s+hoboken/i).test(text)||
+     (compact.includes("4D92FB")&&compact.includes("FF9900")))
+   return "split";
+ if(route.includes("HOB_WTC")||compact.includes("65C100"))return "green";
+ if(route.includes("HOB_33")||compact.includes("4D92FB"))return "blue";
+ if(route.includes("JSQ_33")||compact.includes("FF9900"))return "yellow";
+ return null; // The popup keeps its station-specific color when unknown.
+}
+function pathSetSoonest(rows,headsign,arrival,now,lineColor,routeId){
  const id=pathDestination(headsign);
  if(!id)return;
  const row=rows.find(r=>r.id===id);
  const text=pathEtaText(arrival,now);
- if(row && text && arrival < row.at){row.at=arrival;row.times=[text];}
+ if(row && text && arrival < row.at){
+   row.at=arrival;row.times=[text];
+   row.routeColor=pathTrainColor(headsign,lineColor,routeId,id);
+ }
 }
 function pathResult(code,rows,source,updatedAt){
- // The map renderer consumes only id/name/times, and displays one countdown.
- return {station:code,rows:rows.map(r=>({id:r.id,name:r.name,times:r.times})),
-         updatedAt,source,status:"Live arrival predictions"};
+ // The map displays one countdown and a line-colored circle per destination.
+ return {station:code,rows:rows.map(r=>({
+   id:r.id,name:r.name,times:r.times,routeColor:r.routeColor||null
+ })),updatedAt,source,status:"Live arrival predictions"};
 }
 async function pathJson(url,timeout){
  const req=new Request(url);req.timeoutInterval=timeout;
@@ -491,7 +529,7 @@ async function pathOfficial(code){
      const seconds=Number(m.secondsToArrival);
      if(!Number.isFinite(seconds)||String(m.secondsToArrival||"").trim()==="")continue;
      latest=Math.max(latest,updated);
-     pathSetSoonest(rows,m.headSign,updated+seconds*1000,now);
+     pathSetSoonest(rows,m.headSign,updated+seconds*1000,now,m.lineColor,m.route);
    }
  }
  if(!rows.some(r=>r.times.length))throw Error("Official feed has no current predictions");
@@ -511,7 +549,7 @@ async function pathAlternative(station,code){
      const eta=Date.parse(String(m.projectedArrival||""));
      if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000)continue;
      latest=Math.max(latest,updated);
-     pathSetSoonest(rows,m.headsign,eta,now);
+     pathSetSoonest(rows,m.headsign,eta,now,m.lineColors||m.lineColor||m.line_color,m.route);
    }
    if(!rows.some(r=>r.times.length))throw Error("Secondary feed has no current predictions");
    return pathResult(code,rows,"PATH data API",latest);
@@ -563,7 +601,7 @@ async function showMap(){
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,version:await versionPromise};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
- 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-arrival-popup{max-width:calc(100vw - 24px)}.path-arrival-popup .maplibregl-popup-content{box-sizing:border-box;padding:7px 8px;border-radius:10px;max-width:calc(100vw - 24px);max-height:calc(100vh - 80px);overflow-y:auto}.path-popup{width:194px;max-width:calc(100vw - 44px);color:#15253b;font:11.5px -apple-system,system-ui,sans-serif}.path-arrival-popup .maplibregl-popup-close-button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:400;color:#334155;border-radius:12px;cursor:pointer}.path-arrival-popup .maplibregl-popup-close-button:active{background:#e2e8f0}.path-heading{display:flex;align-items:center;min-height:36px;font-size:12px;font-weight:700;margin-bottom:1px;padding-right:42px}.path-row{display:flex;align-items:center;gap:5px;min-height:24px;border-top:1px solid #edf0f5}.path-dot{height:6px;width:6px;border-radius:50%;background:#2b82d9;flex-shrink:0}.path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.path-times{font-size:12px;font-weight:700;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:43px}.path-spinner{display:inline-block;width:11px;height:11px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:9px;color:#718096;border-top:1px solid #edf0f5;padding-top:5px;margin-top:2px}</style></head><body>'+
+ 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-arrival-popup{max-width:calc(100vw - 24px)}.path-arrival-popup .maplibregl-popup-content{box-sizing:border-box;padding:7px 8px;border-radius:10px;max-width:calc(100vw - 24px);max-height:calc(100vh - 80px);overflow-y:auto}.path-popup{width:194px;max-width:calc(100vw - 44px);color:#15253b;font:11.5px -apple-system,system-ui,sans-serif}.path-arrival-popup .maplibregl-popup-close-button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:400;color:#334155;border-radius:12px;cursor:pointer}.path-arrival-popup .maplibregl-popup-close-button:active{background:#e2e8f0}.path-heading{display:flex;align-items:center;min-height:36px;font-size:12px;font-weight:700;margin-bottom:1px;padding-right:42px}.path-row{display:flex;align-items:center;gap:5px;min-height:24px;border-top:1px solid #edf0f5}.path-dot{height:11px;width:11px;border-radius:50%;background:#4D92FB;flex-shrink:0}.path-dot[data-route=blue]{background:#4D92FB}.path-dot[data-route=yellow]{background:#FF9900}.path-dot[data-route=green]{background:#65C100}.path-dot[data-route=split]{background:linear-gradient(145deg,#4D92FB 0%,#4D92FB 45%,#fff 46%,#fff 54%,#FF9900 55%,#FF9900 100%)}.path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.path-times{font-size:12px;font-weight:700;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:43px}.path-spinner{display:inline-block;width:11px;height:11px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:9px;color:#718096;border-top:1px solid #edf0f5;padding-top:5px;margin-top:2px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
  '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle ETA · PATH predictions · v<span id="shuttle-version"></span></small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
  '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';try{('+mapUI.toString()+')();}catch(e){var status=document.getElementById("status");if(status){status.style.display="block";status.textContent="Map startup error: "+String(e);}}</'+'script></body></html>';
