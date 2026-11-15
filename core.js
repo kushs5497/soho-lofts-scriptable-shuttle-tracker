@@ -97,7 +97,7 @@ async function gps(creds){
 }
 async function imageData(url,svg){try{const r=new Request(url);r.timeoutInterval=10;if(svg){const x=await r.loadString();return "data:image/svg+xml;base64,"+Data.fromString(x).toBase64String();}return "data:image/png;base64,"+Data.fromPNG(await r.loadImage()).toBase64String();}catch(_){return null;}}
 function mapUI(){
- // v17.4.2: shuttle name-box layer removed; version shown for update diagnosis.
+ // v17.4.3: shuttle title layer absent; tap GPS status for viewport diagnostics.
  // No HTML markers, external overlays, transforms, root CSS, or WebView changes.
  const D=window.DATA;
  const map=new maplibregl.Map({container:"map",style:"https://tiles.openfreemap.org/styles/positron",center:D.soho,zoom:14.7,attributionControl:false});
@@ -285,6 +285,36 @@ function mapUI(){
        b.onclick=()=>{selected=b.dataset.stop;refresh();};
      });
      document.getElementById("fit").onclick=()=>fit(650);
+     // Tap GPS status to inspect an intermittent Scriptable/iOS viewport
+     // problem without altering fullscreen sizing or rendered map layers.
+     const gpsStatus=document.getElementById("gps");
+     gpsStatus.style.cursor="pointer";
+     gpsStatus.setAttribute("title","Tap for viewport diagnostics");
+     gpsStatus.onclick=()=>{
+       let panel=document.getElementById("shuttle-debug");
+       if(!panel){
+         panel=document.createElement("div");panel.id="shuttle-debug";
+         panel.style.cssText="position:fixed;z-index:100;top:20%;left:14px;right:14px;padding:16px;border-radius:12px;background:#fffffff5;color:#16263c;border:1px solid #bfcad6;box-shadow:0 5px 28px #0004;font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;max-height:60%;overflow:auto";
+         document.body.appendChild(panel);
+         panel.addEventListener("click",()=>panel.remove());
+       }else{panel.remove();return;}
+       const vv=window.visualViewport,root=document.documentElement,rect=map.getContainer().getBoundingClientRect();
+       panel.textContent=[
+         "v17.4.3 · Viewport diagnostics",
+         "Tap this card to close",
+         "",
+         "screen.height: "+screen.height,
+         "screen.availHeight: "+screen.availHeight,
+         "window.innerHeight: "+window.innerHeight,
+         "document.clientHeight: "+root.clientHeight,
+         "visualViewport.height: "+(vv?Math.round(vv.height):"unknown"),
+         "visualViewport.offsetTop: "+(vv?vv.offsetTop:"unknown"),
+         "map.height: "+Math.round(rect.height),
+         "map.bottom: "+Math.round(rect.bottom),
+         "canvas.height: "+Math.round(map.getCanvas().getBoundingClientRect().height),
+         "devicePixelRatio: "+devicePixelRatio
+       ].join("\n");
+     };
      refresh();setInterval(refresh,30000);
      ready=true;document.getElementById("status").style.display="none";
      fit(0);if(last)updateVehicles(last);
@@ -297,7 +327,7 @@ async function showMap(){
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
  'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
- '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Scheduled departures, not live ETAs · v17.4.2</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
+ '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Scheduled departures, not live ETAs · v17.4.3</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
  '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';('+mapUI.toString()+')();</'+'script></body></html>';
  const web=new WebView();await web.loadHTML(html,"https://openfreemap.org/");
  let stop=false,busy=false,timer;
