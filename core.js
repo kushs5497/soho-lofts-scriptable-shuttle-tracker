@@ -568,10 +568,10 @@ async function pathSignalRConnectParams(code,direction){
 // The existing launcher already fetches it; core reads it as well because
 // installed launchers do not pass version info into imported modules.
 // Offline, use the launcher's locally saved last-successful version.
-async function getAppVersion(){
+async function getAppVersion(branch){
  const valid=v=>typeof v==="string"&&/^[0-9]+[.][0-9]+[.][0-9]+$/.test(v);
  try{
-   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/SignalR/version.json?t="+Date.now());
+   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/"+encodeURIComponent(branch||"main")+"/version.json?t="+Date.now());
    req.timeoutInterval=6;
    req.headers={"Cache-Control":"no-cache",Accept:"application/json"};
    const raw=await req.loadString();
@@ -582,7 +582,7 @@ async function getAppVersion(){
  }catch(e){console.warn("Version manifest unavailable: "+e);}
  try{
    const fm=FileManager.local();
-   const path=fm.joinPath(fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime-SignalR"),"update-state.json");
+   const path=fm.joinPath(fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime-"+(branch||"main")),"update-state.json");
    if(fm.fileExists(path)){
      const state=JSON.parse(fm.readString(path));
      if(state&&valid(state.version))return state.version;
@@ -590,8 +590,8 @@ async function getAppVersion(){
  }catch(e){console.warn("Cached version unavailable: "+e);}
  return "unknown";
 }
-async function showMap(version,developerMode){
- const versionPromise=version ? Promise.resolve(version) : getAppVersion();
+async function showMap(version,developerMode,branch){
+ const versionPromise=version ? Promise.resolve(version) : getAppVersion(branch);
  await pathSignalRSetup();
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,developerMode:!!developerMode,version:await versionPromise};
@@ -666,5 +666,5 @@ async function showMap(version,developerMode){
  }
  finally{stop=true;if(timer)timer.invalidate();if(pathTimer)pathTimer.invalidate();}
 }
-async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap(options.version,options.developerMode);}
+async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap(options.version,options.developerMode,options.branch);}
 module.exports.main=main;
