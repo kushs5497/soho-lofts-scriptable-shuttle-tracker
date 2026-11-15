@@ -1,1 +1,4 @@
-{"version":"17.1.0","entrypoint":"core.js"}
+{
+  "version": "17.1.1",
+  "entrypoint": "core.js"
+}
