@@ -108,6 +108,34 @@ function mapUI(){
     attributionControl:false
   });
   let ready=false,last=null,first=true,selected="soho",userMoved=false;
+
+  // iOS 26 / Scriptable sometimes reports a layout viewport about
+  // 125 points shorter than the actual display during WebView.present().
+  // Size the body to the physical CSS screen height when larger, and
+  // position the map + controls inside that shared coordinate space.
+  function syncScreenHeight(){
+    const viewport=window.visualViewport;
+    const candidates=[
+      window.innerHeight||0,
+      document.documentElement.clientHeight||0,
+      window.screen?window.screen.height:0,
+      viewport?(viewport.height+Math.max(0,viewport.offsetTop)):0
+    ].filter(n=>Number.isFinite(n)&&n>0);
+    const height=Math.ceil(Math.max.apply(null,candidates));
+    if(height>0&&Math.abs(document.body.getBoundingClientRect().height-height)>1){
+      document.body.style.height=height+"px";
+    }
+    map.resize();
+    syncPoints();
+    return {
+      screenHeight:window.screen?window.screen.height:null,
+      innerHeight:window.innerHeight,
+      bodyHeight:document.body.getBoundingClientRect().height,
+      mapHeight:map.getContainer().clientHeight,
+      canvasHeight:map.getCanvas().clientHeight
+    };
+  }
+  window.shuttleSyncViewport=syncScreenHeight;
   const stopPins=new Map(),busPins=new Map(),allPoints=new Set();
 
   function node(tag,className,parent,text){
@@ -185,8 +213,8 @@ function mapUI(){
     point.root.style.left=projected.x+"px";
     point.root.style.top=projected.y+"px";
     // Hide distant pins so they cannot appear over the status/panel.
-    const wide=map.getCanvasContainer().clientWidth;
-    const high=map.getCanvasContainer().clientHeight;
+    const wide=map.getContainer().clientWidth;
+    const high=map.getContainer().clientHeight;
     point.root.style.visibility=
       projected.x < -120 || projected.y < -120 ||
       projected.x > wide+120 || projected.y > high+120
@@ -346,9 +374,10 @@ function mapUI(){
 
   map.on("load",function(){
     try{
-      // Overlay is a child of the SAME element as MapLibre's canvas.
-      // Position from project() and refresh on each rendered map frame.
-      overlay=node("div","geo-overlay",map.getCanvasContainer());
+      // Attach the overlay to the whole map root, not the internal
+      // canvas container, which can clip its children in iOS WebViews.
+      // map.project returns map-root-relative CSS pixels.
+      overlay=node("div","geo-overlay",map.getContainer());
       addStop("soho","SoHo Lofts",D.soho,D.logos[0],"SoHo");
       addStop("hoboken","Hoboken PATH",D.hob,D.logos[1],"PATH");
       addStop("newport","Newport PATH",D.npt,D.logos[1],"PATH");
@@ -362,11 +391,14 @@ function mapUI(){
       map.on("dragstart",function(){userMoved=true;});
       map.on("touchstart",function(){userMoved=true;});
       map.on("wheel",function(){userMoved=true;});
-      window.addEventListener("resize",function(){map.resize();syncPoints();});
+      window.addEventListener("resize",syncScreenHeight);
+      if(window.visualViewport){
+        window.visualViewport.addEventListener("resize",syncScreenHeight);
+      }
       selected="soho";refresh();setInterval(refresh,30000);
       ready=true;
       document.getElementById("status").style.display="none";
-      map.resize();
+      syncScreenHeight();
       fit(0);
       if(last)window.receiveVehicleData(last);
       syncPoints();
@@ -385,7 +417,7 @@ async function showMap(){
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
- 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}.geo-overlay{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:2}.geo-point{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none}.poi-visual{position:absolute;left:0;top:0;transform:translate(-50%,-100%);cursor:pointer;pointer-events:auto}.poi-shape{width:38px;height:50px;display:block;filter:drop-shadow(0 4px 5px rgba(22,34,50,.22))}.poi-logo{position:absolute;left:5px;top:5px;width:28px;height:28px;background:#d9ecf6;border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:hidden}.poi-logo img{display:block;width:100%;height:100%;object-fit:contain}.poi-logo-fallback{font-weight:700;font-size:9px;color:#152b43}.poi-label{position:absolute;left:50%;bottom:57px;transform:translateX(-50%);white-space:nowrap;background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;font-size:13px;font-weight:700;color:#18253a;line-height:1.18;letter-spacing:-.15px}.bus-visual{position:absolute;left:0;top:0;width:25px;height:25px;transform:translate(-50%,-50%);pointer-events:auto;cursor:pointer}.bus-badge{position:absolute;inset:0;z-index:2;border:2.5px solid white;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:14px;font-weight:750;line-height:1;box-shadow:0 3px 7px rgba(22,34,50,.25)}.bus-label{position:absolute;z-index:3;left:50%;bottom:32px;transform:translateX(-50%);background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;color:#18253a;font-size:13px;font-weight:700;line-height:1.18;letter-spacing:-.15px;white-space:nowrap;max-width:175px;text-overflow:ellipsis;overflow:hidden;pointer-events:none}.bus-rotor{position:absolute;z-index:1;left:50%;top:50%;width:44px;height:44px;pointer-events:none;transform-origin:center}.bus-arrow{position:absolute;top:0;left:50%;transform:translateX(-50%);width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:13px solid var(--bus-color,#2563eb);filter:drop-shadow(0 0 1px #fff)}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}</style></head><body>'+
+ 'html{margin:0;padding:0;width:100%;height:100%;background:#edf0f2}body{margin:0;padding:0;width:100%;height:100%;position:relative;overflow:hidden;font-family:-apple-system,sans-serif;background:#edf0f2}#map{position:absolute;inset:0;width:100%;height:100%;overflow:hidden}.geo-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:5}.geo-point{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none}.poi-visual{position:absolute;left:0;top:0;transform:translate(-50%,-100%);cursor:pointer;pointer-events:auto}.poi-shape{width:38px;height:50px;display:block;filter:drop-shadow(0 4px 5px rgba(22,34,50,.22))}.poi-logo{position:absolute;left:5px;top:5px;width:28px;height:28px;background:#d9ecf6;border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:hidden}.poi-logo img{display:block;width:100%;height:100%;object-fit:contain}.poi-logo-fallback{font-weight:700;font-size:9px;color:#152b43}.poi-label{position:absolute;left:50%;bottom:57px;transform:translateX(-50%);white-space:nowrap;background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;font-size:13px;font-weight:700;color:#18253a;line-height:1.18;letter-spacing:-.15px}.bus-visual{position:absolute;left:0;top:0;width:25px;height:25px;transform:translate(-50%,-50%);pointer-events:auto;cursor:pointer}.bus-badge{position:absolute;inset:0;z-index:2;border:2.5px solid white;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:14px;font-weight:750;line-height:1;box-shadow:0 3px 7px rgba(22,34,50,.25)}.bus-label{position:absolute;z-index:3;left:50%;bottom:32px;transform:translateX(-50%);background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;color:#18253a;font-size:13px;font-weight:700;line-height:1.18;letter-spacing:-.15px;white-space:nowrap;max-width:175px;text-overflow:ellipsis;overflow:hidden;pointer-events:none}.bus-rotor{position:absolute;z-index:1;left:50%;top:50%;width:44px;height:44px;pointer-events:none;transform-origin:center}.bus-arrow{position:absolute;top:0;left:50%;transform:translateX(-50%);width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:13px solid var(--bus-color,#2563eb);filter:drop-shadow(0 0 1px #fff)}#status{position:absolute;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:absolute;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:absolute;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
  '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Scheduled departures, not live ETAs</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
  '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';('+mapUI.toString()+')();</'+'script></body></html>';
@@ -393,6 +425,15 @@ async function showMap(){
  let stop=false,busy=false,timer;
  async function poll(){if(!creds||stop||busy)return;busy=true;try{const s=await gps(creds);if(!stop)await web.evaluateJavaScript("window.receiveVehicleData && window.receiveVehicleData("+JSON.stringify(s)+")",false);}catch(e){if(!stop)try{await web.evaluateJavaScript("window.receiveVehicleError && window.receiveVehicleError("+JSON.stringify(String(e))+")",false);}catch(_){}}finally{busy=false;}}
  const dismissed=web.present(true);
+ // Perform a second sizing pass after iOS presents the fullscreen WebView.
+ try{
+   await web.evaluateJavaScript(
+     "window.shuttleSyncViewport && window.shuttleSyncViewport();",
+     false
+   );
+ }catch(err){
+   console.warn("Viewport sizing fallback: "+err);
+ }
  try{if(creds){timer=Timer.schedule(5000,true,()=>{poll().catch(e=>console.warn(e));});poll().catch(e=>console.warn(e));}await dismissed;}
  finally{stop=true;if(timer)timer.invalidate();}
 }
