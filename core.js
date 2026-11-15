@@ -526,7 +526,7 @@ const PATH_CODES={hoboken:"HOB",newport:"NEW"};
 const PATH_SIGNALR_KEY="soho-path-signalr-app-token-v1";
 const PATH_SIGNALR_ENDPOINT="https://panynj-path-af-tb.azurewebsites.net/api/tokenrequest?TKrTIgWSdgikIrqvftckyOh";
 async function pathSignalRSetup(configuredToken){
- const supplied=String(configuredToken||"").trim().replace(/^Bearer\\s+/i,"");
+ const supplied=String(configuredToken||"").trim().replace(/^Bearer\s+/i,"");
  if(supplied){
    Keychain.set(PATH_SIGNALR_KEY,supplied);
    return;
