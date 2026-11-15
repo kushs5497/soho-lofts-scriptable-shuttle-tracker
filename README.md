@@ -21,7 +21,7 @@ The weekday temporary service takes effect on November 16, 2026. In evening auto
 - The repository is public. Never put Verizon credentials or bearer tokens here. Credentials remain in Scriptable Keychain on the iPhone.
 - Hoboken and Newport pins represent PATH station references, not verified curbside shuttle stops.
 - Live GPS polls about every five seconds while the map is open. Widget refresh timing is controlled by iOS.
-- Tap the Hoboken PATH or Newport PATH map pin to see a popup. Hoboken has two preset destination rows; Newport has four. Rows show loading spinners until native Scriptable requests return; the popup refreshes every 30 seconds while open.
+- Tap the Hoboken PATH or Newport PATH map pin to see a popup. Hoboken has two preset destination rows; Newport has four. Rows show loading spinners until native Scriptable requests return; the popup refreshes every 30 seconds while open. No separate PATH script download is necessary.
 - PATH predictions require a fresh official feed. Empty, stale, or failed responses show unavailable times rather than invented arrival estimates. Train routes and availability can change with the timetable.
 - This code has had syntax checks; it still requires first-run iPhone testing.
 
@@ -29,4 +29,4 @@ The weekday temporary service takes effect on November 16, 2026. In evening auto
 - `SoHo_Shuttle_Launcher.js`: installed once on the phone
 - `core.js`: hosted widget and map implementation
 - `version.json`: update detection
-- `path_arrivals.js`: independently downloaded Scriptable-native PATH feed client (public PANYNJ JSON; cached locally after first station tap)
+- PATH arrivals: fetched directly in `core.js` with Scriptable native `Request` (no external PATH module)
