@@ -4,6 +4,7 @@
 
 // Change only this word to switch between production and experiment.
 const BRANCH = "main"; // "main" or "SignalR"
+const DEVELOPER_MODE = false; // true enables diagnostics and expanded map credits
 if (!["main", "SignalR"].includes(BRANCH)) throw Error("Unsupported GitHub branch");
 const REPO = "https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/" + BRANCH + "/";
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;
@@ -43,7 +44,7 @@ async function runModule(path) {
   if (!app || typeof app.main !== "function") {
     throw new Error("Downloaded module does not export main()");
   }
-  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH, version: state.version });
+  await app.main({ tapURL: URLScheme.forRunningScript(), branch: BRANCH, version: state.version, developerMode: DEVELOPER_MODE });
 }
 async function showFailure(message) {
   if (config.runsInWidget) {
