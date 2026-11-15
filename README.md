@@ -45,17 +45,17 @@ cannot run a cached production build by mistake.
 When you first tap the widget to open the map on the SignalR branch, Scriptable will ask
 for the RidePATH **app-level bearer token**. Paste it once; the value is saved in
 Scriptable's local Keychain and is **not committed to this public GitHub repository**.
-Canceling the prompt keeps the existing PATH feed behavior.
+Canceling the prompt leaves SignalR unconfigured; PATH rows show unavailable until a credential is entered.
 
-The experiment requests SignalR tokens and negotiates connections using native
+The experiment exclusively requests SignalR tokens and negotiates connections using native
 Scriptable `Request`. It then attempts the WebSocket handshake in the **existing map
 WebView**, passing browser authentication through the `access_token` query parameter.
 Hoboken subscribes to `ToNY,HOB`; Newport subscribes to `ToNY,NEW` and `ToNJ,NEW`
 concurrently. Each stream is read until one usable update arrives or a 13-second
 timeout; the connections are then closed. New native requests are made on the
 existing 30-second popup refresh cycle. A successful response is mapped into the
-existing colored PATH countdown rows. If SignalR fails, it falls back to the
-unchanged PANYNJ/community-feed sequence.
+existing colored PATH countdown rows. There are **no fallback PATH data sources** on this branch. If SignalR fails,
+the popup shows unavailable and the Scriptable console reports the error.
 
 **Unverified:** Browser WebSocket authentication, CORS/origin behavior and concurrent
 Scriptable WebView evaluation must be tested on the iPhone. GitHub commits and static
