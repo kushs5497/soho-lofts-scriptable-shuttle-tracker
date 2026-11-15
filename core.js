@@ -111,7 +111,7 @@ function mapUI(){
  const D=window.DATA;
  if(D.developerMode)document.body.classList.add("developer-mode");
  document.getElementById("shuttle-version").textContent=String(D.version||"unknown");
- const map=new maplibregl.Map({container:"map",style:"https://tiles.openfreemap.org/styles/positron",center:D.soho,zoom:14.7,attributionControl:false});
+ const map=new maplibregl.Map({container:"map",style:(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"https://tiles.openfreemap.org/styles/dark":"https://tiles.openfreemap.org/styles/positron"),center:D.soho,zoom:14.7,attributionControl:false});
  map.addControl(new maplibregl.AttributionControl({compact:true}),"top-right");
  // Explicitly start with the attribution closed, while retaining tap-to-expand.
  const attributionElement=document.querySelector(".maplibregl-ctrl-attrib");
@@ -431,7 +431,7 @@ function mapUI(){
    const time=vehicleUpdatedAt(v);
    const coords=D.developerMode?'<div class="vehicle-coordinates">Coordinates: '+safe(v.lat.toFixed(5)+", "+v.lon.toFixed(5))+'</div>':"";
    return '<div class="vehicle-card">'+
-     '<div class="vehicle-header"><div class="vehicle-icon" style="background:'+safe(color)+'">🚌</div>'+
+     '<div class="vehicle-header"><div class="vehicle-icon" style="background:'+safe(color)+'"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6v6m8-6v6M5 17h14M5 17V7a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v10M5 17v2h3v-2m8 0v2h3v-2M5 12h14"/><circle cx="8" cy="14.5" r=".7" fill="#fff" stroke="none"/><circle cx="16" cy="14.5" r=".7" fill="#fff" stroke="none"/></svg></div>'+
      '<div class="vehicle-title"><strong>'+safe(title)+'</strong><span>SoHo Lofts Shuttle</span></div>'+
      '<span class="vehicle-status" style="--status-color:'+safe(color)+'">'+safe(label)+'</span></div>'+
      '<div class="vehicle-metrics"><div class="vehicle-metric"><div class="vehicle-metric-label">Speed</div>'+
