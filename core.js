@@ -136,7 +136,7 @@ function mapUI(){
  // Three long-lived WebSockets populate shared cache; popup opens never request data.
  const PATH_STREAMS=["ToNY,HOB","ToNY,NEW","ToNJ,NEW"];
  const pathSnapshots={},pathStates={},pathSockets={};
- let pathPopup=null,activePathStation=null;
+ let pathPopup=null,activePathStation=null,pathPopupOpenedAt=0;
  function pathDest(headSign){
    const h=String(headSign||"").trim().toLowerCase();
    if(/^33(?:rd)?(?:\s*(?:st|street))?\b/.test(h))return "33S";
@@ -180,10 +180,29 @@ function mapUI(){
      }
    }
    node.querySelectorAll(".path-times").forEach(el=>{
-     const train=closest[el.dataset.destination];
+     const dest=el.dataset.destination;
+     const train=closest[dest];
+     const key=(activePathStation==="hoboken"||dest==="33S"||dest==="WTC"?"ToNY,":"ToNJ,")+code;
+     const stream=pathStates[key];
+     const snapshot=pathSnapshots[key];
+     const freshSnapshot=!!snapshot&&now-snapshot.receivedAt<=90000;
+     const pending=!train&&!freshSnapshot&&(!stream||!["error","closed"].includes(stream.status))&&now-pathPopupOpenedAt<30000;
      const remain=train?train.arrival-now:null;
      const value=remain==null?"—":remain<=35000?"Now":Math.max(1,Math.ceil(remain/60000))+" min";
-     if(el.textContent!==value)el.textContent=value;
+     if(pending){
+       if(el.dataset.mode!=="loading"){
+         el.replaceChildren();
+         const spinner=document.createElement("span");
+         spinner.className="path-spinner";
+         spinner.setAttribute("role","status");
+         spinner.setAttribute("aria-label","Loading arrival time");
+         el.appendChild(spinner);
+         el.dataset.mode="loading";
+       }
+     }else if(el.dataset.mode!=="text"||el.textContent!==value){
+       el.textContent=value;
+       el.dataset.mode="text";
+     }
      const dot=el.parentNode&&el.parentNode.querySelector(".path-dot");
      if(dot&&train&&["blue","yellow","green","split"].includes(train.color))dot.dataset.route=train.color;
    });
@@ -199,6 +218,7 @@ function mapUI(){
    if(!PATH_ROWS[station])return;
    if(pathPopup)pathPopup.remove();
    activePathStation=station;
+   pathPopupOpenedAt=Date.now();
    const card=document.createElement("div");card.className="path-popup";
    const title=document.createElement("div");title.className="path-heading";
    title.textContent=(station==="hoboken"?"Hoboken":"Newport")+" PATH";card.appendChild(title);
