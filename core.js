@@ -445,15 +445,12 @@ function mapUI(){
 // Try PANYNJ first. Its feed sometimes returns {"results":[]}, so a separate
 // station-specific API may be tried once as a best-effort fallback.
 // Neither source is assumed to be live unless timestamps confirm freshness.
-const PATH_FEED="https://www.panynj.gov/bin/portauthority/ridepath.json";
-const PATH_ALT="https://path.api.razza.dev/v1/stations/";
 const PATH_CODES={hoboken:"HOB",newport:"NEW"};
 const PATH_DEST={
  HOB:[{id:"33S",name:"33rd Street"},{id:"WTC",name:"World Trade Center"}],
  NEW:[{id:"33S",name:"33rd Street"},{id:"WTC",name:"World Trade Center"},
       {id:"JSQ",name:"Journal Square"},{id:"HOB",name:"Hoboken"}]
 };
-let pathOfficialCache=null,pathOfficialCachedAt=0,pathAltCooldownUntil=0;
 // Experimental RidePATH SignalR client. No app credential is stored in GitHub.
 const PATH_SIGNALR_KEY="soho-path-signalr-app-token-v1";
 const PATH_SIGNALR_ENDPOINT="https://panynj-path-af-tb.azurewebsites.net/api/tokenrequest?TKrTIgWSdgikIrqvftckyOh";
@@ -462,10 +459,10 @@ async function pathSignalRSetup(){
  if(Keychain.contains(PATH_SIGNALR_KEY))return;
  const alert=new Alert();
  alert.title="SignalR test credential";
- alert.message="Enter the RidePATH app bearer token once. It remains in this iPhone's Scriptable Keychain, not GitHub. Cancel uses the existing PATH feeds.";
+ alert.message="Enter the RidePATH app bearer token once. It remains in this iPhone's Scriptable Keychain, not GitHub. Cancel leaves SignalR unconfigured until the next launch.";
  alert.addSecureTextField("RidePATH app bearer token");
  alert.addAction("Save on iPhone");
- alert.addCancelAction("Use existing feed");
+ alert.addCancelAction("Not now");
  if(await alert.presentAlert()<0)return;
  const value=alert.textFieldValue(0).trim().replace(/^Bearer\s+/i,"");
  if(value)Keychain.set(PATH_SIGNALR_KEY,value);
@@ -602,79 +599,9 @@ function pathResult(code,rows,source,updatedAt){
    id:r.id,name:r.name,times:r.times,routeColor:r.routeColor||null
  })),updatedAt,source,status:"Live arrival predictions"};
 }
-async function pathJson(url,timeout){
- const req=new Request(url);req.timeoutInterval=timeout;
- req.headers={Accept:"application/json","Cache-Control":"no-cache"};
- const raw=await req.loadString();
- const http=req.response&&req.response.statusCode;
- if(http>=400)throw Error("PATH HTTP "+http);
- return JSON.parse(raw);
-}
-async function pathOfficial(code){
- let feed=pathOfficialCache;
- if(!feed||Date.now()-pathOfficialCachedAt>15000){
-   feed=await pathJson(PATH_FEED+"?timeStamp="+Date.now(),9);
-   if(!feed||!Array.isArray(feed.results)||!feed.results.length)
-     throw Error("Official feed returned no station data");
-   pathOfficialCache=feed;pathOfficialCachedAt=Date.now();
- }
- const station=feed.results.find(r=>r&&String(r.consideredStation||"").toUpperCase()===code);
- if(!station)throw Error("Station absent from official feed");
- const rows=pathBuildRows(code),now=Date.now();
- let latest=0;
- for(const direction of (station.destinations||[])){
-   for(const m of (direction.messages||[])){
-     if(!m)continue;
-     const updated=Date.parse(String(m.lastUpdated||""));
-     if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000)continue;
-     const seconds=Number(m.secondsToArrival);
-     if(!Number.isFinite(seconds)||String(m.secondsToArrival||"").trim()==="")continue;
-     latest=Math.max(latest,updated);
-     pathSetSoonest(rows,m.headSign,updated+seconds*1000,now,m.lineColor,m.route);
-   }
- }
- if(!rows.some(r=>r.times.length))throw Error("Official feed has no current predictions");
- return pathResult(code,rows,"PANYNJ",latest);
-}
-async function pathAlternative(station,code){
- if(Date.now()<pathAltCooldownUntil)throw Error("Secondary feed temporarily unavailable");
- try{
-   const feed=await pathJson(PATH_ALT+station+"/realtime",6);
-   if(!feed||!Array.isArray(feed.upcomingTrains)||!feed.upcomingTrains.length)
-     throw Error("Secondary feed has no trains");
-   const rows=pathBuildRows(code),now=Date.now();
-   let latest=0;
-   for(const m of feed.upcomingTrains){
-     if(!m)continue;
-     const updated=Date.parse(String(m.lastUpdated||""));
-     const eta=Date.parse(String(m.projectedArrival||""));
-     if(!Number.isFinite(updated)||now-updated>240000||updated-now>60000)continue;
-     latest=Math.max(latest,updated);
-     pathSetSoonest(rows,m.headsign,eta,now,m.lineColors||m.lineColor||m.line_color,m.route);
-   }
-   if(!rows.some(r=>r.times.length))throw Error("Secondary feed has no current predictions");
-   return pathResult(code,rows,"PATH data API",latest);
- }catch(e){
-   // Do not retry a failing community service on every 30-second refresh.
-   pathAltCooldownUntil=Date.now()+60000;
-   throw e;
- }
-}
 async function fetchArrivals(station,web){
- const code=PATH_CODES[station];
- if(!code)throw Error("Unknown PATH station");
- // SignalR is experimental; preserve the existing proven feed as fallback.
- try{return await pathSignalRArrivals(station,web);}
- catch(signalrError){
-   console.warn("SignalR fallback ("+station+"): "+signalrError);
-   try{return await pathOfficial(code);}
-   catch(officialError){
-     try{return await pathAlternative(station,code);}
-     catch(alternativeError){
-       throw Error("SignalR and both existing PATH sources unavailable");
-     }
-   }
- }
+ if(!PATH_CODES[station])throw Error("Unknown PATH station");
+ return await pathSignalRArrivals(station,web);
 }
 // version.json is the only source of release version information.
 // The existing launcher already fetches it; core reads it as well because
