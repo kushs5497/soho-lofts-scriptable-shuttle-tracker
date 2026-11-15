@@ -2,11 +2,10 @@
 // Install this script ONCE on the iPhone. Future app updates come from GitHub.
 // icon-color: blue; icon-glyph: bus
 
-// Change only this word to switch between production and experiment.
-const BRANCH = "main"; // "main" or "SignalR"
+// Any GitHub branch name can be used here; main is the default.
+const BRANCH = "main";
 const DEVELOPER_MODE = false; // true enables diagnostics and expanded map credits
-if (!["main", "SignalR"].includes(BRANCH)) throw Error("Unsupported GitHub branch");
-const REPO = "https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/" + BRANCH + "/";
+const REPO = "https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/" + encodeURIComponent(BRANCH) + "/";
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const fm = FileManager.local();
 const dir = fm.joinPath(fm.documentsDirectory(), "SoHoShuttleRuntime-" + BRANCH);
