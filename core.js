@@ -180,6 +180,8 @@ function mapUI(){
   }
   function position(point){
     const projected=map.project(point.coords);
+    point.screenX=projected.x;
+    point.screenY=projected.y;
     point.root.style.left=projected.x+"px";
     point.root.style.top=projected.y+"px";
     // Hide distant pins so they cannot appear over the status/panel.
@@ -190,7 +192,48 @@ function mapUI(){
       projected.x > wide+120 || projected.y > high+120
       ? "hidden" : "visible";
   }
-  function syncPoints(){if(overlay)allPoints.forEach(position);}
+  function syncPoints(){
+    if(!overlay)return;
+    allPoints.forEach(position);
+    arrangeBusLabels();
+  }
+
+  // The old design used full white name badges.
+  // When buses idle together, lift the badges to separate rows instead
+  // of allowing all three to overlap. Pin centers never move.
+  function arrangeBusLabels(){
+    const placed=[];
+    const buses=Array.from(busPins.values())
+      .filter(pt=>pt.label&&pt.vehicle&&pt.root.style.visibility!=="hidden")
+      .sort((a,b)=>{
+        const na=Number(a.vehicle.number),nb=Number(b.vehicle.number);
+        return (Number.isFinite(na)?na:99)-(Number.isFinite(nb)?nb:99);
+      });
+
+    for(const pt of buses){
+      const w=pt.label.offsetWidth||100;
+      const h=pt.label.offsetHeight||30;
+      let bottom=32,tries=0;
+      while(tries++<8){
+        const rectangle={
+          l:pt.screenX-w/2,
+          r:pt.screenX+w/2,
+          b:pt.screenY+12.5-bottom,
+          t:pt.screenY+12.5-bottom-h
+        };
+        const overlaps=placed.some(prev=>
+          rectangle.l<prev.r+6&&rectangle.r>prev.l-6&&
+          rectangle.t<prev.b+5&&rectangle.b>prev.t-5
+        );
+        if(!overlaps){
+          placed.push(rectangle);
+          break;
+        }
+        bottom+=h+7;
+      }
+      pt.label.style.bottom=bottom+"px";
+    }
+  }
   function removePoint(point){
     if(!point)return;
     allPoints.delete(point);
@@ -237,6 +280,7 @@ function mapUI(){
     const rotor=node("div","bus-rotor",visual);
     node("div","bus-arrow",rotor);
     const badge=node("div","bus-badge",visual);
+    const nameLabel=node("div","bus-label",visual);
     visual.addEventListener("click",function(event){
       event.stopPropagation();
       if(!pt.vehicle)return;
@@ -247,6 +291,7 @@ function mapUI(){
     });
     pt.rotor=rotor;
     pt.badge=badge;
+    pt.label=nameLabel;
     busPins.set(v.id,pt);
     return pt;
   }
@@ -259,6 +304,7 @@ function mapUI(){
     const color=D.colors[n]||D.colors.unknown;
     pt.badge.style.backgroundColor=color;
     pt.badge.textContent=n==="unknown"?"?":n;
+    pt.label.textContent=v.name||("Shuttle "+n);
     pt.rotor.style.setProperty("--bus-color",color);
     pt.rotor.style.display=moving(v)?"block":"none";
     // The arrow turns, while the badge and its number remain upright.
@@ -339,7 +385,7 @@ async function showMap(){
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
- 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}.geo-overlay{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:2}.geo-point{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none}.poi-visual{position:absolute;left:0;top:0;transform:translate(-50%,-100%);cursor:pointer;pointer-events:auto}.poi-shape{width:38px;height:50px;display:block;filter:drop-shadow(0 3px 4px #0003)}.poi-logo{position:absolute;left:5px;top:5px;width:28px;height:28px;background:#d9ecf6;border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:hidden}.poi-logo img{display:block;width:100%;height:100%;object-fit:contain}.poi-logo-fallback{font-weight:700;font-size:9px;color:#152b43}.poi-label{position:absolute;left:50%;bottom:55px;transform:translateX(-50%);white-space:nowrap;background:#fff;border:1px solid #e7edf4;border-radius:7px;box-shadow:0 2px 7px #0002;padding:4px 7px;font-size:11px;font-weight:650;color:#18283c;line-height:1.15}.bus-visual{position:absolute;left:0;top:0;width:25px;height:25px;transform:translate(-50%,-50%);pointer-events:auto;cursor:pointer}.bus-badge{position:absolute;inset:0;z-index:2;border:2px solid white;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:14px;font-weight:750;line-height:1;box-shadow:0 2px 5px #0004}.bus-rotor{position:absolute;z-index:1;left:50%;top:50%;width:44px;height:44px;pointer-events:none;transform-origin:center}.bus-arrow{position:absolute;top:0;left:50%;transform:translateX(-50%);width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:13px solid var(--bus-color,#2563eb);filter:drop-shadow(0 0 1px #fff)}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}</style></head><body>'+
+ 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}.geo-overlay{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:2}.geo-point{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none}.poi-visual{position:absolute;left:0;top:0;transform:translate(-50%,-100%);cursor:pointer;pointer-events:auto}.poi-shape{width:38px;height:50px;display:block;filter:drop-shadow(0 4px 5px rgba(22,34,50,.22))}.poi-logo{position:absolute;left:5px;top:5px;width:28px;height:28px;background:#d9ecf6;border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:hidden}.poi-logo img{display:block;width:100%;height:100%;object-fit:contain}.poi-logo-fallback{font-weight:700;font-size:9px;color:#152b43}.poi-label{position:absolute;left:50%;bottom:57px;transform:translateX(-50%);white-space:nowrap;background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;font-size:13px;font-weight:700;color:#18253a;line-height:1.18;letter-spacing:-.15px}.bus-visual{position:absolute;left:0;top:0;width:25px;height:25px;transform:translate(-50%,-50%);pointer-events:auto;cursor:pointer}.bus-badge{position:absolute;inset:0;z-index:2;border:2.5px solid white;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:14px;font-weight:750;line-height:1;box-shadow:0 3px 7px rgba(22,34,50,.25)}.bus-label{position:absolute;z-index:3;left:50%;bottom:32px;transform:translateX(-50%);background:#fff;border:1px solid rgba(210,219,229,.9);border-radius:11px;box-shadow:0 3px 10px rgba(25,37,56,.20),0 1px 3px rgba(25,37,56,.09);padding:7px 10px;color:#18253a;font-size:13px;font-weight:700;line-height:1.18;letter-spacing:-.15px;white-space:nowrap;max-width:175px;text-overflow:ellipsis;overflow:hidden;pointer-events:none}.bus-rotor{position:absolute;z-index:1;left:50%;top:50%;width:44px;height:44px;pointer-events:none;transform-origin:center}.bus-arrow{position:absolute;top:0;left:50%;transform:translateX(-50%);width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:13px solid var(--bus-color,#2563eb);filter:drop-shadow(0 0 1px #fff)}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
  '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Scheduled departures, not live ETAs</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
  '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';('+mapUI.toString()+')();</'+'script></body></html>';
