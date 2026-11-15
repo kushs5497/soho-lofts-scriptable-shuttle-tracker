@@ -48,13 +48,14 @@ Scriptable's local Keychain and is **not committed to this public GitHub reposit
 Canceling the prompt leaves SignalR unconfigured; PATH rows show unavailable until a credential is entered.
 
 The experiment exclusively requests SignalR tokens and negotiates connections using native
-Scriptable `Request`. It then attempts the WebSocket handshake in the **existing map
-WebView**, passing browser authentication through the `access_token` query parameter.
-Hoboken subscribes to `ToNY,HOB`; Newport subscribes to `ToNY,NEW` and `ToNJ,NEW`
-concurrently. Each stream is read until one usable update arrives or a 13-second
-timeout; the connections are then closed. New native requests are made on the
-existing 30-second popup refresh cycle. A successful response is mapped into the
-existing colored PATH countdown rows. There are **no fallback PATH data sources** on this branch. If SignalR fails,
+Scriptable `Request`. When the map opens, it establishes three persistent browser
+WebSockets in the existing WebView: Hoboken toward NY and Newport toward NY/NJ.
+Arrivals are cached in the WebView and continuously updated by incoming SignalR
+messages. Opening a PATH popup reads the shared cache immediately, without requesting
+new data; the visible ETA text changes once per second without resetting or displaying
+a spinner. Every 25 seconds, the native Scriptable side checks stream health and
+negotiates a replacement connection only for disconnected or stale streams. A successful
+update preserves the existing colored PATH countdown rows. There are **no fallback PATH data sources** on this branch. If SignalR fails,
 the popup shows unavailable and the Scriptable console reports the error.
 
 **Unverified:** Browser WebSocket authentication, CORS/origin behavior and concurrent
