@@ -105,6 +105,80 @@ function mapUI(){
  const fc=a=>({type:"FeatureCollection",features:a||[]});
  let ready=false,last=null,selected="soho";
  const vehicles=new Map();
+ // Station predictions live in a separate Scriptable-native module.
+ // The WebView only renders the popup; it never fetches cross-origin data.
+ const PATH_ROWS={
+   hoboken:[["33S","33rd Street"],["WTC","World Trade Center"]],
+   newport:[["33S","33rd Street"],["WTC","World Trade Center"],
+            ["JSQ","Journal Square"],["HOB","Hoboken"]]
+ };
+ let pathPopup=null,activePathStation=null,pathRequest=null,pathRequestId=0;
+ function pathLoading(){
+   if(!pathPopup)return;
+   pathPopup.getElement().querySelectorAll(".path-times").forEach(el=>{
+     el.textContent="";
+     const spinner=document.createElement("span");
+     spinner.className="path-spinner";
+     spinner.setAttribute("aria-label","Loading live arrival times");
+     el.appendChild(spinner);
+   });
+   const note=pathPopup.getElement().querySelector(".path-note");
+   if(note)note.textContent="Fetching live PATH arrivals…";
+ }
+ function askPathRefresh(){
+   if(!pathPopup||!activePathStation)return;
+   pathLoading();
+   pathRequest={id:++pathRequestId,station:activePathStation};
+ }
+ function openPathPopup(feature){
+   const station=feature.properties.id;
+   if(!PATH_ROWS[station])return;
+   if(pathPopup)pathPopup.remove();
+   activePathStation=station;
+   const card=document.createElement("div");
+   card.className="path-popup";
+   const title=document.createElement("div");
+   title.className="path-heading";
+   title.textContent=(station==="hoboken"?"Hoboken":"Newport")+" PATH · Next trains";
+   card.appendChild(title);
+   PATH_ROWS[station].forEach(([id,name])=>{
+     const row=document.createElement("div");row.className="path-row";
+     const dot=document.createElement("span");dot.className="path-dot";
+     const label=document.createElement("span");label.className="path-label";label.textContent=name;
+     const times=document.createElement("span");times.className="path-times";
+     times.dataset.destination=id;
+     row.append(dot,label,times);card.appendChild(row);
+   });
+   const note=document.createElement("div");note.className="path-note";card.appendChild(note);
+   const popupObj=new maplibregl.Popup({offset:20,maxWidth:"345px",closeOnClick:true})
+     .setLngLat(feature.geometry.coordinates).setDOMContent(card).addTo(map);
+   pathPopup=popupObj;
+   popupObj.on("close",()=>{
+     if(pathPopup===popupObj){pathPopup=null;activePathStation=null;pathRequest=null;}
+   });
+   askPathRefresh();
+ }
+ window.takePathStationRequest=()=>{const r=pathRequest;pathRequest=null;return r;};
+ window.receivePathStationData=payload=>{
+   if(!payload||!pathPopup||payload.id!==pathRequestId||payload.station!==activePathStation)return;
+   const element=pathPopup.getElement(),note=element.querySelector(".path-note");
+   if(payload.error){
+     element.querySelectorAll(".path-times").forEach(x=>x.textContent="Unavailable");
+     note.textContent="Live times unavailable · "+String(payload.error).slice(0,100);
+     return;
+   }
+   const d=payload.result||{};
+   const rows=Array.isArray(d.rows)?d.rows:[];
+   const byId={};rows.forEach(r=>{byId[r.id]=r;});
+   element.querySelectorAll(".path-times").forEach(el=>{
+     const row=byId[el.dataset.destination];
+     el.textContent=row&&row.times&&row.times.length?row.times.join(" · "):"—";
+   });
+   note.textContent=String(d.status||"No trains reported")+
+     (d.updatedAt?" · Updated "+new Date(d.updatedAt).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):"");
+ }
+ setInterval(()=>{if(activePathStation)askPathRefresh();},30000);
+
 
  function safe(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
  function decode(uri){return new Promise(ok=>{if(!uri)return ok(null);const i=new Image();i.onload=()=>ok(i);i.onerror=()=>ok(null);i.src=uri;});}
@@ -276,6 +350,8 @@ function mapUI(){
      map.on("click","pins",e=>{
        const f=e.features&&e.features[0];if(!f)return;
        selected=f.properties.id;refresh();
+       if(PATH_ROWS[selected])openPathPopup(f);
+       else if(pathPopup)pathPopup.remove();
      });
      map.on("click","buses",e=>{
        const f=e.features&&e.features[0];if(!f)return;
@@ -323,20 +399,64 @@ function mapUI(){
    }catch(e){document.getElementById("status").textContent="Map error: "+e;}
  });
 }
+// Load the PATH client from its own GitHub file on first station-pin tap.
+// Keep the module version in the local filename so updates cannot silently
+// use older cached parsing logic. No change to the one-time launcher is needed.
+async function loadPathArrivalsModule(){
+ const fm=FileManager.local(),dir=fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime");
+ if(!fm.fileExists(dir))fm.createDirectory(dir,true);
+ const file=fm.joinPath(dir,"path_arrivals_v1.js");
+ if(!fm.fileExists(file)){
+   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/main/path_arrivals.js?rev=1");
+   req.timeoutInterval=12;req.headers={"Cache-Control":"no-cache"};
+   const source=await req.loadString();
+   if(req.response&&req.response.statusCode>=400)throw Error("PATH module HTTP "+req.response.statusCode);
+   if(!source.includes("module.exports.fetchArrivals"))throw Error("PATH module download invalid");
+   fm.writeString(file,source);
+ }
+ const api=importModule(file);
+ if(!api||typeof api.fetchArrivals!=="function")throw Error("PATH module missing fetchArrivals()");
+ return api;
+}
 async function showMap(){
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
- 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}</style></head><body>'+
+ 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-popup{width:290px;color:#15253b;font:13px -apple-system,system-ui,sans-serif}.path-heading{font-size:14px;font-weight:700;margin-bottom:8px;padding-right:18px}.path-row{display:flex;align-items:center;gap:8px;min-height:34px;border-top:1px solid #edf0f5}.path-dot{height:8px;width:8px;border-radius:50%;background:#2b82d9;flex-shrink:0}.path-label{flex:1;min-width:0}.path-times{font-weight:650;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:58px}.path-spinner{display:inline-block;width:12px;height:12px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:11px;color:#718096;border-top:1px solid #edf0f5;padding-top:8px;margin-top:3px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
- '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Scheduled departures, not live ETAs · v17.4.5</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
+ '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle departures scheduled · PATH arrivals live · v17.5.0</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
  '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';('+mapUI.toString()+')();</'+'script></body></html>';
  const web=new WebView();await web.loadHTML(html,"https://openfreemap.org/");
- let stop=false,busy=false,timer;
+ let stop=false,busy=false,timer,pathTimer,pathBusy=false,pathModulePromise=null;
+ async function pollPath(){
+   if(stop||pathBusy)return;
+   let q;
+   try{
+     q=await web.evaluateJavaScript("window.takePathStationRequest && window.takePathStationRequest()",false);
+   }catch(_){return;}
+   if(!q||!["hoboken","newport"].includes(q.station))return;
+   pathBusy=true;
+   try{
+     if(!pathModulePromise)pathModulePromise=loadPathArrivalsModule();
+     let client;
+     try{client=await pathModulePromise;}catch(e){pathModulePromise=null;throw e;}
+     const data=await client.fetchArrivals(q.station);
+     if(!stop)await web.evaluateJavaScript("window.receivePathStationData && window.receivePathStationData("+JSON.stringify({id:q.id,station:q.station,result:data})+")",false);
+   }catch(e){
+     if(!stop)try{
+       await web.evaluateJavaScript("window.receivePathStationData && window.receivePathStationData("+JSON.stringify({id:q.id,station:q.station,error:String(e)})+")",false);
+     }catch(_){}
+   }finally{pathBusy=false;}
+ }
  async function poll(){if(!creds||stop||busy)return;busy=true;try{const s=await gps(creds);if(!stop)await web.evaluateJavaScript("window.receiveVehicleData && window.receiveVehicleData("+JSON.stringify(s)+")",false);}catch(e){if(!stop)try{await web.evaluateJavaScript("window.receiveVehicleError && window.receiveVehicleError("+JSON.stringify(String(e))+")",false);}catch(_){}}finally{busy=false;}}
  const dismissed=web.present(true);
- try{if(creds){timer=Timer.schedule(5000,true,()=>{poll().catch(e=>console.warn(e));});poll().catch(e=>console.warn(e));}await dismissed;}
- finally{stop=true;if(timer)timer.invalidate();}
+ try{
+   pathTimer=Timer.schedule(750,true,()=>{pollPath().catch(e=>console.warn("PATH: "+e));});
+   pollPath().catch(e=>console.warn("PATH: "+e));
+   if(creds){timer=Timer.schedule(5000,true,()=>{poll().catch(e=>console.warn(e));});poll().catch(e=>console.warn(e));}
+   await dismissed;
+ }
+ finally{stop=true;if(timer)timer.invalidate();if(pathTimer)pathTimer.invalidate();}
 }
 async function main(options){if(config.runsInWidget)Script.setWidget(await widget(options.tapURL||URLScheme.forRunningScript()));else await showMap();}
 module.exports.main=main;
