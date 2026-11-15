@@ -147,7 +147,7 @@ function mapUI(){
      const label=document.createElement("span");label.className="path-label";label.textContent=name;
      const times=document.createElement("span");times.className="path-times";
      times.dataset.destination=id;
-     row.append(dot,label,times);card.appendChild(row);
+     row.appendChild(dot);row.appendChild(label);row.appendChild(times);card.appendChild(row);
    });
    const note=document.createElement("div");note.className="path-note";card.appendChild(note);
    const popupObj=new maplibregl.Popup({offset:20,maxWidth:"345px",closeOnClick:true})
@@ -399,35 +399,104 @@ function mapUI(){
    }catch(e){document.getElementById("status").textContent="Map error: "+e;}
  });
 }
-// Load the PATH client from its own GitHub file on first station-pin tap.
-// Keep the module version in the local filename so updates cannot silently
-// use older cached parsing logic. No change to the one-time launcher is needed.
-async function loadPathArrivalsModule(){
- const fm=FileManager.local(),dir=fm.joinPath(fm.documentsDirectory(),"SoHoShuttleRuntime");
- if(!fm.fileExists(dir))fm.createDirectory(dir,true);
- const file=fm.joinPath(dir,"path_arrivals_v1.js");
- if(!fm.fileExists(file)){
-   const req=new Request("https://raw.githubusercontent.com/kushs5497/soho-lofts-scriptable-shuttle-tracker/main/path_arrivals.js?rev=1");
-   req.timeoutInterval=12;req.headers={"Cache-Control":"no-cache"};
-   const source=await req.loadString();
-   if(req.response&&req.response.statusCode>=400)throw Error("PATH module HTTP "+req.response.statusCode);
-   if(!source.includes("module.exports.fetchArrivals"))throw Error("PATH module download invalid");
-   fm.writeString(file,source);
- }
- const api=importModule(file);
- if(!api||typeof api.fetchArrivals!=="function")throw Error("PATH module missing fetchArrivals()");
- return api;
+// PATH arrivals for the SoHo Lofts Scriptable map.
+// Runs in Scriptable (native Request), never inside the WebView.
+// Public PANYNJ feed; no API key is required.
+const FEED_URL = "https://www.panynj.gov/bin/portauthority/ridepath.json";
+const STATION_CODES = {hoboken:"HOB",newport:"NEW"};
+const DESTINATIONS = {
+  HOB:[{id:"33S",name:"33rd Street"},{id:"WTC",name:"World Trade Center"}],
+  NEW:[{id:"33S",name:"33rd Street"},{id:"WTC",name:"World Trade Center"},
+       {id:"JSQ",name:"Journal Square"},{id:"HOB",name:"Hoboken"}]
+};
+let feedCache=null, cachedAt=0;
+
+function headsignDestination(text) {
+  const s=String(text||"").trim().toLowerCase();
+  // Match the actual train destination, not a "via Hoboken" intermediate stop.
+  if(/^33(?:rd)?\s*(?:st|street)\b/.test(s))return "33S";
+  if(/^world\s+trade\s+center\b|^wtc\b/.test(s))return "WTC";
+  if(/^journal\s+square\b|^jsq\b/.test(s))return "JSQ";
+  if(/^hoboken\b/.test(s))return "HOB";
+  return null;
 }
+async function getFeed(){
+  if(feedCache && Date.now()-cachedAt<15000)return feedCache;
+  const req=new Request(FEED_URL+"?t="+Date.now());
+  req.timeoutInterval=12;
+  req.headers={Accept:"application/json","Cache-Control":"no-cache"};
+  const raw=await req.loadString();
+  if(req.response && req.response.statusCode>=400)throw Error("PATH HTTP "+req.response.statusCode);
+  const data=JSON.parse(raw);
+  if(!data || !Array.isArray(data.results) || data.results.length===0)
+    throw Error("PATH feed has no station predictions");
+  feedCache=data;
+  cachedAt=Date.now();
+  return data;
+}
+function arrivalText(msg,now){
+  const note=String(msg.arrivalTimeMessage||"").trim();
+  const secs=Number(msg.secondsToArrival);
+  const updated=Date.parse(String(msg.lastUpdated||""));
+  if(Number.isFinite(updated) && Number.isFinite(secs) && String(msg.secondsToArrival||"").trim()!==""){
+    const remaining=(updated+secs*1000-now)/1000;
+    if(remaining< -45)return null;
+    if(remaining<=35)return "Due";
+    return Math.ceil(remaining/60)+" min";
+  }
+  if(/delay/i.test(note))return "Delayed";
+  return note||null;
+}
+
+async function fetchArrivals(station){
+  const code=STATION_CODES[station]||station;
+  if(!DESTINATIONS[code])throw Error("Unknown PATH station: "+station);
+  const data=await getFeed();
+  const result=data.results.find(x=>x && String(x.consideredStation||"").toUpperCase()===code);
+  if(!result)throw Error("PATH station missing from feed");
+  const rows=DESTINATIONS[code].map(r=>({id:r.id,name:r.name,times:[]}));
+  const byId={};for(const r of rows)byId[r.id]=r;
+  const now=Date.now();
+  let count=0,freshCount=0,latest=0;
+  for(const direction of (Array.isArray(result.destinations)?result.destinations:[])){
+    for(const m of (Array.isArray(direction.messages)?direction.messages:[])){
+      if(!m)continue;
+      count++;
+      const updated=Date.parse(String(m.lastUpdated||""));
+      // Do not silently display yesterday's or otherwise stale predictions.
+      if(!Number.isFinite(updated)||now-updated>180000||updated-now>60000)continue;
+      freshCount++;
+      latest=Math.max(latest,updated);
+      const id=headsignDestination(m.headSign);
+      if(!id||!byId[id])continue;
+      const display=arrivalText(m,now);
+      if(!display)continue;
+      let arrival=Infinity;
+      const seconds=Number(m.secondsToArrival);
+      if(String(m.secondsToArrival||"").trim()!==""&&Number.isFinite(seconds))
+        arrival=updated+seconds*1000;
+      byId[id].times.push({text:display,at:arrival});
+    }
+  }
+  if(count>0&&freshCount===0)throw Error("PATH predictions are stale");
+  for(const row of rows){
+    row.times.sort((a,b)=>a.at-b.at);
+    row.times=row.times.slice(0,2).map(x=>x.text);
+  }
+  return {station:code,rows,updatedAt:latest||null,
+    status:count===0?"No upcoming trains reported":"Live PATH arrival predictions"};
+}
+
 async function showMap(){
  const creds=await credentials(),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
  'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#title{font-weight:bold}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}#fit{border:0;background:#dbeafe;border-radius:8px;padding:7px;color:#155ac1}.maplibregl-ctrl-top-right{top:60px}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-popup{width:290px;color:#15253b;font:13px -apple-system,system-ui,sans-serif}.path-heading{font-size:14px;font-weight:700;margin-bottom:8px;padding-right:18px}.path-row{display:flex;align-items:center;gap:8px;min-height:34px;border-top:1px solid #edf0f5}.path-dot{height:8px;width:8px;border-radius:50%;background:#2b82d9;flex-shrink:0}.path-label{flex:1;min-width:0}.path-times{font-weight:650;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:58px}.path-spinner{display:inline-block;width:12px;height:12px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:11px;color:#718096;border-top:1px solid #edf0f5;padding-top:8px;margin-top:3px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div><div id="top"><span id="gps">Waiting for GPS…</span><button id="fit">Fit shuttles</button></div>'+
- '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle departures scheduled · PATH arrivals live · v17.5.0</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
- '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';('+mapUI.toString()+')();</'+'script></body></html>';
+ '<div id="panel"><div id="title">SoHo Lofts</div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle departures scheduled · PATH predictions · v17.5.1</small><div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div></div>'+
+ '<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></'+'script><script>window.DATA='+JSON.stringify(data)+';try{('+mapUI.toString()+')();}catch(e){var status=document.getElementById("status");if(status){status.style.display="block";status.textContent="Map startup error: "+String(e);}}</'+'script></body></html>';
  const web=new WebView();await web.loadHTML(html,"https://openfreemap.org/");
- let stop=false,busy=false,timer,pathTimer,pathBusy=false,pathModulePromise=null;
+ let stop=false,busy=false,timer,pathTimer,pathBusy=false;
  async function pollPath(){
    if(stop||pathBusy)return;
    let q;
@@ -437,10 +506,7 @@ async function showMap(){
    if(!q||!["hoboken","newport"].includes(q.station))return;
    pathBusy=true;
    try{
-     if(!pathModulePromise)pathModulePromise=loadPathArrivalsModule();
-     let client;
-     try{client=await pathModulePromise;}catch(e){pathModulePromise=null;throw e;}
-     const data=await client.fetchArrivals(q.station);
+     const data=await fetchArrivals(q.station);
      if(!stop)await web.evaluateJavaScript("window.receivePathStationData && window.receivePathStationData("+JSON.stringify({id:q.id,station:q.station,result:data})+")",false);
    }catch(e){
      if(!stop)try{
@@ -451,8 +517,9 @@ async function showMap(){
  async function poll(){if(!creds||stop||busy)return;busy=true;try{const s=await gps(creds);if(!stop)await web.evaluateJavaScript("window.receiveVehicleData && window.receiveVehicleData("+JSON.stringify(s)+")",false);}catch(e){if(!stop)try{await web.evaluateJavaScript("window.receiveVehicleError && window.receiveVehicleError("+JSON.stringify(String(e))+")",false);}catch(_){}}finally{busy=false;}}
  const dismissed=web.present(true);
  try{
-   pathTimer=Timer.schedule(750,true,()=>{pollPath().catch(e=>console.warn("PATH: "+e));});
-   pollPath().catch(e=>console.warn("PATH: "+e));
+   // Keep PATH polling entirely separate from map startup. The polling
+   // bridge becomes active only after the WebView has had time to render.
+   pathTimer=Timer.schedule(2500,true,()=>{pollPath().catch(e=>console.warn("PATH: "+e));});
    if(creds){timer=Timer.schedule(5000,true,()=>{poll().catch(e=>console.warn(e));});poll().catch(e=>console.warn(e));}
    await dismissed;
  }
