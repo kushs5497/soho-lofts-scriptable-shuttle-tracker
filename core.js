@@ -125,6 +125,7 @@ function mapUI(){
  const fc=a=>({type:"FeatureCollection",features:a||[]});
  let ready=false,last=null,selected="soho";
  const vehicles=new Map();
+ let vehiclePopup=null,selectedVehicleId=null;
  // Station predictions live in a separate Scriptable-native module.
  // The WebView only renders the popup; it never fetches cross-origin data.
  // Third value is the default route dot color when no live train is reported.
@@ -300,6 +301,7 @@ function mapUI(){
  };
  // Local second-by-second countdown; never refetch or show a loading spinner.
  setInterval(updatePathPopup,1000);
+ setInterval(updateVehiclePopup,1000);
 
  function safe(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
  function decode(uri){return new Promise(ok=>{if(!uri)return ok(null);const i=new Image();i.onload=()=>ok(i);i.onerror=()=>ok(null);i.src=uri;});}
@@ -399,11 +401,53 @@ function mapUI(){
      el.appendChild(row);
    });
  }
- function popup(v){return "<b>"+safe(v.name)+"</b><div>Status: "+safe(v.iconClass||v.status||"Unknown")+
-   "</div><div>Speed: "+safe(v.speed==null?"Unknown":v.speed+" mph")+
-   "</div><div>Heading: "+safe(v.heading==null?"Unknown":v.heading+"°")+
-   "</div><div>GPS update: "+safe(v.lastUpdate||"Unknown")+"</div>"+
-   "<div>Coordinates: "+safe(v.lat.toFixed(5)+", "+v.lon.toFixed(5))+"</div>";}
+ function vehicleUpdatedAt(v){
+   const raw=v.updated||v.lastUpdate;
+   if(!raw)return null;
+   const dotnet=/^\/Date\((\d+)/.exec(String(raw));
+   const parsed=dotnet?Number(dotnet[1]):Date.parse(String(raw));
+   return Number.isFinite(parsed)?parsed:null;
+ }
+ function relativeGPS(at){
+   if(!at)return "GPS time unavailable";
+   const sec=Math.max(0,Math.round((Date.now()-at)/1000));
+   if(sec<15)return "Updated just now";
+   if(sec<60)return "Updated "+sec+" sec ago";
+   if(sec<3600)return "Updated "+Math.floor(sec/60)+" min ago";
+   return "Updated "+new Date(at).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+ }
+ function compassHeading(v){
+   const deg=Number(v.heading);
+   if(v.heading==null||!Number.isFinite(deg))return {dir:"—",deg:""};
+   const labels=["N","NE","E","SE","S","SW","W","NW"];
+   return {dir:labels[Math.round((((deg%360)+360)%360)/45)%8],deg:Math.round(((deg%360)+360)%360)+"°"};
+ }
+ function popup(v){
+   const state=travelState(v),label=state==="moving"?"Moving":state==="idle"?"Idling":"Stopped";
+   const color=D.colors[state]||D.colors.stopped;
+   const title=v.number!=="unknown"?"Shuttle "+v.number:(v.name||"Shuttle");
+   const heading=compassHeading(v);
+   const speed=Number.isFinite(v.speed)?Math.max(0,Math.round(v.speed)).toString():"—";
+   const time=vehicleUpdatedAt(v);
+   const coords=D.developerMode?'<div class="vehicle-coordinates">Coordinates: '+safe(v.lat.toFixed(5)+", "+v.lon.toFixed(5))+'</div>':"";
+   return '<div class="vehicle-card">'+
+     '<div class="vehicle-header"><div class="vehicle-icon" style="background:'+safe(color)+'">🚌</div>'+
+     '<div class="vehicle-title"><strong>'+safe(title)+'</strong><span>SoHo Lofts Shuttle</span></div>'+
+     '<span class="vehicle-status" style="--status-color:'+safe(color)+'">'+safe(label)+'</span></div>'+
+     '<div class="vehicle-metrics"><div class="vehicle-metric"><div class="vehicle-metric-label">Speed</div>'+
+     '<div class="vehicle-metric-value">'+safe(speed)+' <small>mph</small></div></div>'+
+     '<div class="vehicle-metric"><div class="vehicle-metric-label">Heading</div>'+
+     '<div class="vehicle-metric-value">'+safe(heading.dir)+' <small>'+safe(heading.deg)+'</small></div></div></div>'+
+     '<div class="vehicle-footer"><span class="vehicle-live-dot"></span><span class="vehicle-updated">'+safe(relativeGPS(time))+'</span><span class="vehicle-gps">GPS</span></div>'+coords+'</div>';
+ }
+ function updateVehiclePopup(){
+   if(!vehiclePopup||!selectedVehicleId)return;
+   const v=vehicles.get(selectedVehicleId);
+   const el=vehiclePopup.getElement();
+   if(!el||!v)return;
+   const stamp=el.querySelector(".vehicle-updated");
+   if(stamp)stamp.textContent=relativeGPS(vehicleUpdatedAt(v));
+ }
  function fresh(v){
    if(typeof v.updated==="string"){
      const match=/^\/Date\((\d+)/.exec(v.updated);
@@ -446,6 +490,7 @@ function mapUI(){
    document.getElementById("sync-time").textContent="Updated at "+synced;
    if(D.developerMode)document.getElementById("gps").textContent=snapshot.vehicles.length+" vehicle"+
      (snapshot.vehicles.length===1?"":"s")+" · Synced "+synced;
+   updateVehiclePopup();
    // Receiving new GPS data never changes the user's chosen map framing.
    return true;
  }
@@ -502,8 +547,13 @@ function mapUI(){
      map.on("click","buses",e=>{
        const f=e.features&&e.features[0];if(!f)return;
        const v=vehicles.get(f.properties.id);
-       if(v)new maplibregl.Popup({offset:14,maxWidth:"300px"})
+       if(!v)return;
+       if(vehiclePopup)vehiclePopup.remove();
+       selectedVehicleId=v.id;
+       const opened=new maplibregl.Popup({offset:14,maxWidth:"calc(100vw - 24px)",className:"vehicle-map-popup"})
          .setLngLat(f.geometry.coordinates).setHTML(popup(v)).addTo(map);
+       vehiclePopup=opened;
+       opened.on("close",()=>{if(vehiclePopup===opened){vehiclePopup=null;selectedVehicleId=null;}});
      });
      document.querySelectorAll("#tabs button").forEach(b=>{
        b.onclick=()=>{selected=b.dataset.stop;refresh();};
@@ -630,7 +680,7 @@ async function showMap(version,developerMode,branch,ridePathToken,shuttleCredent
  const creds=await credentials(shuttleCredentials),logos=await Promise.all([imageData(SOHO_LOGO,false),imageData(PATH_LOGO,true)]),day=schedule(new Date());
  const data={soho:SOHO,hob:HOB,npt:NPT,logos,colors:COLORS,events:day.events,sunday:day.dow===0,developerMode:!!developerMode,version:await versionPromise};
  const html='<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"><style>'+
- 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}html,body{background:#fff}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#panel-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}#title{font-weight:bold}#sync-time{font-size:10px;color:#64748b;white-space:nowrap;font-variant-numeric:tabular-nums}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}.maplibregl-ctrl-attrib,.maplibregl-ctrl-attrib-inner{font-size:11px}.maplibregl-ctrl-top-right{top:calc(8px + env(safe-area-inset-top));right:8px}.developer-mode .maplibregl-ctrl-top-right{top:calc(68px + env(safe-area-inset-top))}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-arrival-popup{max-width:calc(100vw - 24px)}.path-arrival-popup .maplibregl-popup-content{box-sizing:border-box;padding:7px 8px;border-radius:10px;max-width:calc(100vw - 24px);max-height:calc(100vh - 80px);overflow-y:auto}.path-popup{width:194px;max-width:calc(100vw - 44px);color:#15253b;font:11.5px -apple-system,system-ui,sans-serif}.path-arrival-popup .maplibregl-popup-close-button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:400;color:#334155;border-radius:12px;cursor:pointer}.path-arrival-popup .maplibregl-popup-close-button:active{background:#e2e8f0}.path-heading{display:flex;align-items:center;min-height:36px;font-size:12px;font-weight:700;margin-bottom:1px;padding-right:42px}.path-row{display:flex;align-items:center;gap:5px;min-height:24px;border-top:1px solid #edf0f5}.path-dot{height:11px;width:11px;border-radius:50%;background:#4D92FB;flex-shrink:0}.path-dot[data-route=blue]{background:#4D92FB}.path-dot[data-route=yellow]{background:#FF9900}.path-dot[data-route=green]{background:#65C100}.path-dot[data-route=split]{background:linear-gradient(145deg,#4D92FB 0%,#4D92FB 45%,#fff 46%,#fff 54%,#FF9900 55%,#FF9900 100%)}.path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.path-times{font-size:12px;font-weight:700;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:43px}.path-spinner{display:inline-block;width:11px;height:11px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:9px;color:#718096;border-top:1px solid #edf0f5;padding-top:5px;margin-top:2px}</style></head><body>'+
+ 'html,body,#map{margin:0;width:100%;height:100%;font-family:-apple-system}html,body{background:#fff}#map{position:fixed;inset:0}#status{position:fixed;top:45%;left:10%;right:10%;z-index:50;padding:15px;background:white;border-radius:12px}#top{position:fixed;top:calc(8px + env(safe-area-inset-top));left:12px;right:12px;z-index:20;padding:10px;background:#fffffff0;border-radius:12px;display:flex;gap:12px}#gps{flex:1;font-size:12px}#panel{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:12px;right:12px;padding:14px;background:#fffffff5;border-radius:15px;box-shadow:0 3px 15px #0002}#panel-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}#title{font-weight:bold}#sync-time{font-size:10px;color:#64748b;white-space:nowrap;font-variant-numeric:tabular-nums}#tabs{display:flex;margin:8px 0;gap:6px}#tabs button{flex:1;padding:7px;border:1px solid #ddd;border-radius:8px}#tabs button.active{background:#dbeafe}#departures{font-size:12px}#credits{font-size:9px;color:#77808f;margin-top:7px}#credits a{color:inherit;text-decoration:none}.maplibregl-ctrl-attrib,.maplibregl-ctrl-attrib-inner{font-size:11px}.maplibregl-ctrl-top-right{top:calc(8px + env(safe-area-inset-top));right:8px}.developer-mode .maplibregl-ctrl-top-right{top:calc(68px + env(safe-area-inset-top))}.maplibregl-ctrl-bottom-left,.maplibregl-ctrl-bottom-right{bottom:160px}.path-arrival-popup{max-width:calc(100vw - 24px)}.path-arrival-popup .maplibregl-popup-content{box-sizing:border-box;padding:7px 8px;border-radius:10px;max-width:calc(100vw - 24px);max-height:calc(100vh - 80px);overflow-y:auto}.path-popup{width:194px;max-width:calc(100vw - 44px);color:#15253b;font:11.5px -apple-system,system-ui,sans-serif}.path-arrival-popup .maplibregl-popup-close-button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;line-height:1;font-weight:400;color:#334155;border-radius:12px;cursor:pointer}.path-arrival-popup .maplibregl-popup-close-button:active{background:#e2e8f0}.path-heading{display:flex;align-items:center;min-height:36px;font-size:12px;font-weight:700;margin-bottom:1px;padding-right:42px}.path-row{display:flex;align-items:center;gap:5px;min-height:24px;border-top:1px solid #edf0f5}.path-dot{height:11px;width:11px;border-radius:50%;background:#4D92FB;flex-shrink:0}.path-dot[data-route=blue]{background:#4D92FB}.path-dot[data-route=yellow]{background:#FF9900}.path-dot[data-route=green]{background:#65C100}.path-dot[data-route=split]{background:linear-gradient(145deg,#4D92FB 0%,#4D92FB 45%,#fff 46%,#fff 54%,#FF9900 55%,#FF9900 100%)}.path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.path-times{font-size:12px;font-weight:700;white-space:nowrap;color:#172b45;display:flex;align-items:center;justify-content:flex-end;min-width:43px}.path-spinner{display:inline-block;width:11px;height:11px;border:2px solid #d5e4f7;border-top-color:#2563eb;border-radius:50%;animation:path-spin .8s linear infinite}@keyframes path-spin{to{transform:rotate(360deg)}}.path-note{font-size:9px;color:#718096;border-top:1px solid #edf0f5;padding-top:5px;margin-top:2px}.vehicle-map-popup .maplibregl-popup-content{padding:0;border-radius:14px;overflow:hidden;box-shadow:0 8px 26px #0f172a25}.vehicle-map-popup .maplibregl-popup-close-button{z-index:2;font-size:23px;width:34px;height:34px;color:#64748b;line-height:30px}.vehicle-card{box-sizing:border-box;width:260px;max-width:calc(100vw - 44px);padding:15px 13px 11px;color:#15253b;font:12px -apple-system,system-ui,sans-serif}.vehicle-header{display:flex;align-items:center;gap:8px;padding-right:18px}.vehicle-icon{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:21px;flex-shrink:0}.vehicle-title{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}.vehicle-title strong{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vehicle-title span{font-size:10px;color:#64748b;white-space:nowrap}.vehicle-status{font-size:9px;font-weight:650;color:var(--status-color);border:1px solid var(--status-color);border-radius:10px;padding:3px 5px;white-space:nowrap}.vehicle-metrics{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #e9eef5;border-bottom:1px solid #e9eef5;margin-top:12px;padding:12px 0;gap:13px}.vehicle-metric-label{font-size:11px;color:#718096;margin-bottom:4px}.vehicle-metric-value{font-size:23px;font-weight:750;letter-spacing:-.5px;font-variant-numeric:tabular-nums}.vehicle-metric-value small{font-size:11px;font-weight:500;color:#64748b;letter-spacing:0}.vehicle-footer{display:flex;align-items:center;gap:6px;padding-top:10px;color:#64748b;font-size:10px}.vehicle-live-dot{height:6px;width:6px;flex-shrink:0;border-radius:50%;background:#94a3b8}.vehicle-updated{flex:1}.vehicle-gps{font-size:9px}.vehicle-coordinates{font-size:9px;color:#94a3b8;margin-top:7px}</style></head><body>'+
  '<div id="map"></div><div id="status">Loading map…</div>' +
  (developerMode ? '<div id="top"><span id="gps">Waiting for GPS…</span></div>' : '<span id="gps" style="display:none"></span>') +
  '<div id="panel"><div id="panel-heading"><div id="title">SoHo Lofts</div><div id="sync-time">Updated at —</div></div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle ETA · PATH predictions · v<span id="shuttle-version"></span></small>' + (developerMode ? '<div id="credits">Map: <a href="https://openmaptiles.org/" target="_blank" rel="noopener">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></div>' : '') + '</div>'+
