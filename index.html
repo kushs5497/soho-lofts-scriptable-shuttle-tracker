@@ -144,6 +144,24 @@ function mapUI(){
   {id:"newark",code:"NWK",name:"Newark Penn Station",xy:[-74.16375,40.73454]}
  ];
  const PATH_BY_ID=Object.fromEntries(PATH_STATIONS.map(st=>[st.id,st]));
+ // Keep a single station source and update only the focus state on selection.
+ let focusedStopId=null;
+ function stationFeatures(){
+   const makeStop=(xy,id,name,icon,pill,pillActive,soho)=>make(xy,{
+     id,name,icon,pill,pillActive,selected:focusedStopId===id,soho:!!soho
+   });
+   return fc([
+     makeStop(D.soho,"soho","SoHo Lofts","soho","pill-soho","pill-soho-active",true),
+     ...PATH_STATIONS.map(st=>makeStop(st.xy,st.id,st.name+" PATH","path-"+st.code,
+       "pill-"+st.code,"pill-"+st.code+"-active",false))
+   ]);
+ }
+ function focusStop(id){
+   focusedStopId=id||null;
+   const source=map.getSource("stops");
+   if(source)source.setData(stationFeatures());
+ }
+
  const PATH_FEEDS=PATH_STATIONS.flatMap(st=>(["ToNY","ToNJ"].map(dir=>({
    code:st.code,expected:dir+","+st.code,
    direction:dir==="ToNY"?"New York":"New Jersey"
@@ -275,6 +293,7 @@ function mapUI(){
    const station=feature.properties.id;
    if(!PATH_BY_ID[station])return;
    if(pathPopup)pathPopup.remove();
+   focusStop(station);
    activateStation(station);
    activePathStation=station;
    pathPopupOpenedAt=Date.now();
@@ -315,7 +334,7 @@ function mapUI(){
    const popupObj=new maplibregl.Popup({offset:12,maxWidth:"calc(100vw - 24px)",closeOnClick:false,className:"path-arrival-popup"})
      .setLngLat(feature.geometry.coordinates).setDOMContent(card).addTo(map);
    pathPopup=popupObj;
-   popupObj.on("close",()=>{if(pathPopup===popupObj){pathPopup=null;activePathStation=null;deactivateStation();}});
+   popupObj.on("close",()=>{if(pathPopup===popupObj){pathPopup=null;activePathStation=null;focusStop(null);deactivateStation();}});
    updatePathPopup();
  }
  // Native Scriptable prepares fresh negotiation URLs only for disconnected streams.
@@ -400,6 +419,29 @@ function mapUI(){
    x.shadowColor="transparent";x.stroke();
    if(logo){try{x.drawImage(logo,9,9,30,30);}catch(_){}}
    else{x.fillStyle="#2384c4";x.font="bold 10px Arial";x.textAlign="center";x.fillText("PATH",24,27);}
+   return x.getImageData(0,0,c.width,c.height);
+ }
+
+ // Compact Mapbox-style transit pill drawn once per station and per theme.
+ // Returned ImageData is directly compatible with map.addImage().
+ function stationPill(label,dark,active,soho){
+   const scale=2,metric=document.createElement("canvas").getContext("2d");
+   const font="600 12px -apple-system, BlinkMacSystemFont, system-ui, Arial, sans-serif";
+   metric.font=font;
+   const w=Math.ceil(metric.measureText(label).width)+38,h=30;
+   const c=document.createElement("canvas");c.width=(w+10)*scale;c.height=(h+10)*scale;
+   const x=c.getContext("2d");x.scale(scale,scale);x.font=font;
+   x.shadowColor=active?"#0b579a77":"#0003";x.shadowBlur=active?7:5;x.shadowOffsetY=2;
+   rounded(x,5,4,w,h,15);
+   x.fillStyle=active?"#187bb8":dark?"#23364a":"#ffffff";x.fill();
+   x.shadowColor="transparent";x.shadowBlur=0;x.shadowOffsetY=0;
+   x.strokeStyle=active?"#b7e6ff":dark?"#557188":"#cddce9";
+   x.lineWidth=active?1.5:1;x.stroke();
+   x.beginPath();x.arc(20,19,5.5,0,Math.PI*2);
+   x.fillStyle=active?"#ffffff":soho?"#26b89a":"#35a8d6";x.fill();
+   x.textBaseline="middle";x.textAlign="left";
+   x.fillStyle=active||dark?"#f6fbff":"#203247";
+   x.fillText(label,31,19);
    return x.getImageData(0,0,c.width,c.height);
  }
  function rounded(x,left,top,width,height,r){
@@ -593,10 +635,23 @@ function mapUI(){
    try{
      const logos=await Promise.all(D.logos.map(decode));
      map.addImage("soho",pin(logos[0],"SoHo","SoHo Lofts",darkMode),{pixelRatio:2});
-     map.addImage("path-mini",miniPin(logos[1],darkMode),{pixelRatio:2});
-     map.addImage("soho-mini",miniPin(logos[0],darkMode),{pixelRatio:2});
-     for(const station of PATH_STATIONS)
+     for(const station of PATH_STATIONS){
        map.addImage("path-"+station.code,pin(logos[1],"PATH",station.name+" PATH",darkMode),{pixelRatio:2});
+       const label=station.name.replace("World Trade Center","World Trade Ctr")
+         .replace("Christopher Street","Christopher St")
+         .replace("Newark Penn Station","Newark Penn")
+         .replace("Exchange Place","Exchange Pl")
+         .replace("Journal Square","Journal Sq")
+         .replace("Grove Street","Grove St")
+         .replace("33rd Street","33rd St")
+         .replace("23rd Street","23rd St")
+         .replace("14th Street","14th St")
+         .replace("9th Street","9th St");
+       map.addImage("pill-"+station.code,stationPill(label,darkMode,false,false),{pixelRatio:2});
+       map.addImage("pill-"+station.code+"-active",stationPill(label,darkMode,true,false),{pixelRatio:2});
+     }
+     map.addImage("pill-soho",stationPill("SoHo Lofts",darkMode,false,true),{pixelRatio:2});
+     map.addImage("pill-soho-active",stationPill("SoHo Lofts",darkMode,true,true),{pixelRatio:2});
      for(const number of ["1","2","3","unknown"]){
        for(const state of ["moving","idle","stopped"]){
          map.addImage("bus-"+number+"-"+state,
@@ -614,30 +669,49 @@ function mapUI(){
        layout:{"icon-image":["get","icon"],"icon-anchor":"center",
          "icon-rotation-alignment":"viewport",
          "icon-allow-overlap":true,"icon-ignore-placement":true}});
-     map.addSource("stops",{type:"geojson",data:fc([
-       make(D.soho,{id:"soho",name:"SoHo Lofts",icon:"soho",mini:"soho-mini"}),
-       ...PATH_STATIONS.map(st=>make(st.xy,{id:st.id,name:st.name+" PATH",icon:"path-"+st.code,mini:"path-mini"}))
-     ])});
-     map.addLayer({id:"pins",type:"symbol",source:"stops",minzoom:13,
+     map.addSource("stops",{type:"geojson",data:stationFeatures()});
+     // Close zoom: original branded destination pins.
+     map.addLayer({id:"pins",type:"symbol",source:"stops",minzoom:14,
        layout:{"icon-image":["get","icon"],"icon-anchor":"bottom",
          "icon-allow-overlap":true,"icon-ignore-placement":true}});
-     map.addLayer({id:"pins-mini",type:"symbol",source:"stops",maxzoom:13,
-       layout:{"icon-image":["get","mini"],"icon-anchor":"center",
-         "icon-allow-overlap":true,"icon-ignore-placement":true,
-         "text-field":["get","name"],"text-size":10,"text-font":["Noto Sans Regular"],
-         "text-anchor":"top","text-offset":[0,1.7],"text-optional":true,
-         "text-allow-overlap":false,"text-max-width":8},
-       paint:{"text-color":"#34465e","text-halo-color":"#ffffff","text-halo-width":1.3}});
+     // Neighborhood zoom: subtle, single-line pills. Selected pill always wins.
+     map.addLayer({id:"pins-pills",type:"symbol",source:"stops",minzoom:13,maxzoom:14,
+       filter:["!=",["get","selected"],true],
+       layout:{"icon-image":["get","pill"],"icon-anchor":"center",
+         "icon-allow-overlap":false,"icon-padding":3}});
+     map.addLayer({id:"pins-pill-selected",type:"symbol",source:"stops",minzoom:13,maxzoom:14,
+       filter:["==",["get","selected"],true],
+       layout:{"icon-image":["get","pillActive"],"icon-anchor":"center",
+         "icon-allow-overlap":true,"icon-ignore-placement":true}});
+     // Full-network zoom: quiet dots, with a larger focused dot and label.
+     map.addLayer({id:"pins-dots",type:"circle",source:"stops",maxzoom:13,
+       filter:["!=",["get","selected"],true],
+       paint:{"circle-radius":7,
+         "circle-color":["case",["get","soho"],"#26b89a","#35a8d6"],
+         "circle-stroke-color":darkMode?"#1b2c3c":"#ffffff",
+         "circle-stroke-width":2}});
+     map.addLayer({id:"pins-dot-selected",type:"circle",source:"stops",maxzoom:13,
+       filter:["==",["get","selected"],true],
+       paint:{"circle-radius":11,"circle-color":"#238fc9",
+         "circle-stroke-color":"#ffffff","circle-stroke-width":3}});
+     map.addLayer({id:"pins-focus-label",type:"symbol",source:"stops",maxzoom:13,
+       filter:["==",["get","selected"],true],
+       layout:{"icon-image":["get","pillActive"],"icon-anchor":"top",
+         "icon-offset":[0,17],"icon-allow-overlap":true,"icon-ignore-placement":true}});
      if(!ready){
      const selectStation=e=>{
        const f=e.features&&e.features[0];if(!f)return;
        const id=f.properties.id;
        if(["soho","hoboken","newport"].includes(id)){selected=id;refresh();}
        if(PATH_BY_ID[id])openPathPopup(f);
-       else if(pathPopup)pathPopup.remove();
+       else{
+         if(pathPopup)pathPopup.remove();
+         focusStop(id);
+       }
      };
      map.on("click","pins",selectStation);
-     map.on("click","pins-mini",selectStation);
+     for(const layer of ["pins-pills","pins-pill-selected","pins-dots","pins-dot-selected","pins-focus-label"])
+       map.on("click",layer,selectStation);
      // Tapping the map outside a station pin dismisses PATH arrivals.
      // A station-pin click also bubbles to the map, so explicitly keep
      // popups open when the tap falls on a pin.
@@ -645,7 +719,9 @@ function mapUI(){
        if(!pathPopup)return;
        const target=e.originalEvent&&e.originalEvent.target;
        if(target&&target.closest&&target.closest(".maplibregl-popup"))return;
-       const hits=map.queryRenderedFeatures(e.point,{layers:["pins","pins-mini"]});
+       const hits=map.queryRenderedFeatures(e.point,{layers:[
+         "pins","pins-pills","pins-pill-selected","pins-dots","pins-dot-selected","pins-focus-label"
+       ]});
        if(hits&&hits.length)return;
        pathPopup.remove();
      });
