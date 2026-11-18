@@ -364,22 +364,27 @@ function mapUI(){
  // Native Scriptable prepares fresh negotiation URLs only for disconnected streams.
  window.pathStreamHealth=()=>{
    const now=Date.now();
-   return PATH_STREAMS.filter(key=>{
-     const state=pathStates[key];
-     if(!state)return true;
-     if(state.status==="connecting"&&now-state.started<25000)return false;
-     if(state.status==="connected"&&now-state.lastMessage<90000)return false;
-     return true;
+   // Only one WebSocket may be in its opening phase, across ALL stations.
+   if([...pathWanted].some(key=>pathStates[key]&&pathStates[key].status==="connecting"&&
+      now-pathStates[key].started<20000))return [];
+   const active=activePathStation&&PATH_BY_ID[activePathStation];
+   const ordered=[...pathWanted].sort((a,b)=>
+     Number(!!active&&b.endsWith(","+active.code))-Number(!!active&&a.endsWith(","+active.code)));
+   const key=ordered.find(k=>{
+     const state=pathStates[k];
+     return !state||state.status!=="connected"||now-state.lastMessage>90000;
    });
+   const feed=PATH_FEEDS.find(f=>f.expected===key);
+   return feed?[feed]:[];
  };
  window.pathStreamFailure=(key,error)=>{
-   if(!PATH_STREAMS.includes(key))return;
+   if(!PATH_STREAMS.includes(key)||!pathWanted.has(key))return;
    pathStates[key]={status:"error",started:Date.now(),lastMessage:0,error:String(error)};
    updatePathPopup();
  };
- window.pathInstallStreams=feeds=>{
+  window.pathInstallStreams=feeds=>{
    for(const feed of feeds){
-     if(!feed||!PATH_STREAMS.includes(feed.expected)||typeof feed.url!=="string")continue;
+     if(!feed||!PATH_STREAMS.includes(feed.expected)||!pathWanted.has(feed.expected)||typeof feed.url!=="string")continue;
      const key=feed.expected,old=pathSockets[key];
      if(old){try{old.close();}catch(_){}}
      const state={status:"connecting",started:Date.now(),lastMessage:0,error:null};
@@ -756,7 +761,12 @@ async function pathSignalRPost(url,body,headers){
 }
 async function pathSignalRConnectParams(code,direction){
  const credential=Keychain.get(PATH_SIGNALR_KEY);
- const station=code==="HOB"?"Hoboken":"Newport";
+ const stations={HOB:"Hoboken",NEW:"Newport",GRV:"Grove Street",EXP:"Exchange Place",
+   JSQ:"Journal Square",WTC:"World Trade Center",CHR:"Christopher Street",
+   "09S":"9th Street","14S":"14th Street","23S":"23rd Street","33S":"33rd Street",
+   HAR:"Harrison",NWK:"Newark"};
+ const station=stations[code];
+ if(!station)throw Error("Unknown PATH station code");
  const auth=await pathSignalRPost(PATH_SIGNALR_ENDPOINT,
    JSON.stringify({station,direction}),
    {Authorization:"Bearer "+credential,AppName:"RidePATH",AppVersion:"6.2.2","Content-Type":"application/json"});
@@ -827,44 +837,34 @@ async function showMap(version,developerMode,branch,ridePathToken,shuttleCredent
    return;
  }
  let stop=false,busy=false,timer,pathTimer,pathBusy=false;
- const FEEDS=[
-   ["HOB","New York","ToNY,HOB"],
-   ["NEW","New York","ToNY,NEW"],
-   ["NEW","New Jersey","ToNJ,NEW"]
- ];
  const retryAfter={};
  async function maintainPathStreams(){
    if(stop||pathBusy||!Keychain.contains(PATH_SIGNALR_KEY))return;
    pathBusy=true;
    try{
-     const keys=await web.evaluateJavaScript("window.pathStreamHealth ? window.pathStreamHealth() : []",false);
-     if(!Array.isArray(keys))return;
-     const now=Date.now();
-     const due=FEEDS.filter(f=>keys.includes(f[2])&&now>=(retryAfter[f[2]]||0));
-     if(!due.length)return;
-     // Independent tokens, negotiation and WebSockets; failure of one does not block others.
-     due.forEach(f=>{retryAfter[f[2]]=now+30000;});
-     const prepared=await Promise.allSettled(due.map(f=>pathSignalRConnectParams(f[0],f[1])));
-     for(let i=0;i<prepared.length;i++){
-       const result=prepared[i],key=due[i][2];
-       if(stop)return;
-       if(result.status==="fulfilled"){
-         const conn=result.value;
-         await web.evaluateJavaScript("window.pathInstallStreams && window.pathInstallStreams("+JSON.stringify([conn])+")",false);
-       }else{
-         const error=String(result.reason);
-         console.warn("SignalR "+key+": "+error);
-         await web.evaluateJavaScript("window.pathStreamFailure && window.pathStreamFailure("+JSON.stringify(key)+","+JSON.stringify(error)+")",false);
-       }
+     const feeds=await web.evaluateJavaScript("window.pathStreamHealth ? window.pathStreamHealth() : []",false);
+     if(!Array.isArray(feeds)||!feeds.length)return;
+     // Serialized: exactly ONE negotiation and ONE WebSocket install per turn.
+     const feed=feeds[0],key=String(feed.expected||"");
+     if(!key||Date.now()<(retryAfter[key]||0))return;
+     retryAfter[key]=Date.now()+45000;
+     try{
+       const connection=await pathSignalRConnectParams(feed.code,feed.direction);
+       if(!stop)await web.evaluateJavaScript(
+         "window.pathInstallStreams && window.pathInstallStreams("+JSON.stringify([connection])+")",false);
+     }catch(err){
+       const message=String(err);console.warn("SignalR "+key+": "+message);
+       if(!stop)await web.evaluateJavaScript(
+         "window.pathStreamFailure && window.pathStreamFailure("+JSON.stringify(key)+","+JSON.stringify(message)+")",false);
      }
    }catch(err){console.warn("SignalR stream manager: "+err);}
    finally{pathBusy=false;}
  }
- async function poll(){if(!creds||stop||busy)return;busy=true;try{const s=await gps(creds);if(!stop)await web.evaluateJavaScript("window.receiveVehicleData && window.receiveVehicleData("+JSON.stringify(s)+")",false);}catch(e){if(!stop)try{await web.evaluateJavaScript("window.receiveVehicleError && window.receiveVehicleError("+JSON.stringify(String(e))+")",false);}catch(_){}}finally{busy=false;}}
+  async function poll(){if(!creds||stop||busy)return;busy=true;try{const s=await gps(creds);if(!stop)await web.evaluateJavaScript("window.receiveVehicleData && window.receiveVehicleData("+JSON.stringify(s)+")",false);}catch(e){if(!stop)try{await web.evaluateJavaScript("window.receiveVehicleError && window.receiveVehicleError("+JSON.stringify(String(e))+")",false);}catch(_){}}finally{busy=false;}}
  const dismissed=web.present(true);
  try{
-   // Connect all three streams on map launch; monitor only for disconnected streams.
-   pathTimer=Timer.schedule(25000,true,()=>{maintainPathStreams().catch(e=>console.warn("PATH: "+e));});
+   // Keep nearby PATH feeds alive and connect other tapped stations sequentially.
+   pathTimer=Timer.schedule(2500,true,()=>{maintainPathStreams().catch(e=>console.warn("PATH: "+e));});
    // Delay the first WebSocket negotiations until the map is visibly presented.
    const startupTimer=Timer.schedule(3500,false,()=>{
      maintainPathStreams().catch(e=>console.warn("PATH: "+e));
