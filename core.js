@@ -682,7 +682,11 @@ function mapUI(){
          "icon-allow-overlap":true,"icon-ignore-placement":true}});
      map.addLayer({id:"pins-mini",type:"symbol",source:"stops",maxzoom:13,
        layout:{"icon-image":["get","mini"],"icon-anchor":"center",
-         "icon-allow-overlap":true,"icon-ignore-placement":true}});
+         "icon-allow-overlap":true,"icon-ignore-placement":true,
+         "text-field":["get","name"],"text-size":10,"text-font":["Noto Sans Regular"],
+         "text-anchor":"top","text-offset":[0,1.7],"text-optional":true,
+         "text-allow-overlap":false,"text-max-width":8},
+       paint:{"text-color":"#34465e","text-halo-color":"#ffffff","text-halo-width":1.3}});
      if(!ready){
      const selectStation=e=>{
        const f=e.features&&e.features[0];if(!f)return;
