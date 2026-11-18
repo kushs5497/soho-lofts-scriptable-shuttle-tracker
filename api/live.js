@@ -102,9 +102,14 @@ async function loadGPS(){
 async function pathConnection(station,direction){
   const token=process.env.RIDEPATH_SECRET_TOKEN;
   if(!token)throw Error("RidePATH token not configured");
-  const stations={HOB:"Hoboken",NEW:"Newport"};
-  if(!stations[station]||!["New York","New Jersey"].includes(direction)||
-     (station==="HOB"&&direction!=="New York")){
+  const stations={
+    HOB:"Hoboken",NEW:"Newport",GRV:"Grove Street",EXP:"Exchange Place",
+    JSQ:"Journal Square",WTC:"World Trade Center",CHR:"Christopher Street",
+    "09S":"9th Street","14S":"14th Street","23S":"23rd Street",
+    "33S":"33rd Street",HAR:"Harrison",NWK:"Newark"
+  };
+  if(!Object.prototype.hasOwnProperty.call(stations,station)||
+     !["New York","New Jersey"].includes(direction)){
     const err=new Error("Invalid PATH station or direction");err.status=400;throw err;
   }
   const authRaw=await request(PATH_URL,{
