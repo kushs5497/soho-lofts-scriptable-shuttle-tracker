@@ -386,12 +386,10 @@ function mapUI(){
    const active=activePathStation&&PATH_BY_ID[activePathStation];
    const ordered=[...pathWanted].sort((a,b)=>
      Number(!!active&&b.endsWith(","+active.code))-Number(!!active&&a.endsWith(","+active.code)));
-   const key=ordered.find(k=>{
+   return ordered.filter(k=>{
      const state=pathStates[k];
      return !state||state.status!=="connected"||now-state.lastMessage>90000;
-   });
-   const feed=PATH_FEEDS.find(f=>f.expected===key);
-   return feed?[feed]:[];
+   }).map(key=>PATH_FEEDS.find(f=>f.expected===key)).filter(Boolean);
  };
  window.pathStreamFailure=(key,error)=>{
    if(!PATH_STREAMS.includes(key)||!pathWanted.has(key))return;
@@ -880,8 +878,10 @@ async function showMap(version,developerMode,branch,ridePathToken,shuttleCredent
      const feeds=await web.evaluateJavaScript("window.pathStreamHealth ? window.pathStreamHealth() : []",false);
      if(!Array.isArray(feeds)||!feeds.length)return;
      // Serialized: exactly ONE negotiation and ONE WebSocket install per turn.
-     const feed=feeds[0],key=String(feed.expected||"");
-     if(!key||Date.now()<(retryAfter[key]||0))return;
+     const feed=feeds.find(item=>item&&Date.now()>=(retryAfter[String(item.expected||"")]||0));
+     if(!feed)return;
+     const key=String(feed.expected||"");
+     if(!key)return;
      retryAfter[key]=Date.now()+45000;
      try{
        const connection=await pathSignalRConnectParams(feed.code,feed.direction);
