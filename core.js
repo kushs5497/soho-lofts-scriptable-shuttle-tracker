@@ -170,9 +170,52 @@ function mapUI(){
    newport:[["33S","33rd Street","yellow"],["WTC","World Trade Center","green"],
             ["JSQ","Journal Square","yellow"],["HOB","Hoboken","blue"]]
  };
- // Three long-lived WebSockets populate shared cache; popup opens never request data.
- const PATH_STREAMS=["ToNY,HOB","ToNY,NEW","ToNJ,NEW"];
+ // Stations and their RidePATH streams. Load extra stations only when tapped.
+ const PATH_STATIONS=[
+  {id:"hoboken",code:"HOB",name:"Hoboken",xy:D.hob},
+  {id:"newport",code:"NEW",name:"Newport",xy:D.npt},
+  {id:"grove",code:"GRV",name:"Grove Street",xy:[-74.0431,40.7197]},
+  {id:"exchange",code:"EXP",name:"Exchange Place",xy:[-74.032981,40.7162]},
+  {id:"journal",code:"JSQ",name:"Journal Square",xy:[-74.063114,40.732141]},
+  {id:"wtc",code:"WTC",name:"World Trade Center",xy:[-74.0105,40.7118]},
+  {id:"christopher",code:"CHR",name:"Christopher Street",xy:[-74.006821,40.733602]},
+  {id:"ninth",code:"09S",name:"9th Street",xy:[-73.9997,40.7341]},
+  {id:"fourteenth",code:"14S",name:"14th Street",xy:[-73.996862,40.737393]},
+  {id:"twentythird",code:"23S",name:"23rd Street",xy:[-73.9929,40.7429]},
+  {id:"thirtythird",code:"33S",name:"33rd Street",xy:[-73.9887,40.7486]},
+  {id:"harrison",code:"HAR",name:"Harrison",xy:[-74.15587,40.73942]},
+  {id:"newark",code:"NWK",name:"Newark Penn Station",xy:[-74.16375,40.73454]}
+ ];
+ const PATH_BY_ID=Object.fromEntries(PATH_STATIONS.map(st=>[st.id,st]));
+ const PATH_FEEDS=PATH_STATIONS.flatMap(st=>(["ToNY","ToNJ"].map(dir=>({
+   code:st.code,expected:dir+","+st.code,
+   direction:dir==="ToNY"?"New York":"New Jersey"
+ }))));
+ const PATH_STREAMS=PATH_FEEDS.map(f=>f.expected);
+ const PATH_PINNED=new Set(["ToNY,HOB","ToNY,NEW","ToNJ,NEW"]);
+ const pathWanted=new Set(PATH_PINNED);
  const pathSnapshots={},pathStates={},pathSockets={};
+ function activateStation(id){
+   const st=PATH_BY_ID[id];if(!st)return;
+   const extra=new Set(["ToNY,"+st.code,"ToNJ,"+st.code]);
+   for(const key of [...pathWanted]){
+     if(PATH_PINNED.has(key)||extra.has(key))continue;
+     pathWanted.delete(key);
+     const ws=pathSockets[key];delete pathSockets[key];
+     if(ws)try{ws.close();}catch(_){}
+     delete pathStates[key];delete pathSnapshots[key];
+   }
+   for(const key of extra)pathWanted.add(key);
+ }
+ function deactivateStation(){
+   for(const key of [...pathWanted]){
+     if(PATH_PINNED.has(key))continue;
+     pathWanted.delete(key);
+     const ws=pathSockets[key];delete pathSockets[key];
+     if(ws)try{ws.close();}catch(_){}
+     delete pathStates[key];delete pathSnapshots[key];
+   }
+ }
  let pathPopup=null,activePathStation=null,pathPopupOpenedAt=0;
  function pathDest(headSign){
    const h=String(headSign||"").trim().toLowerCase();
