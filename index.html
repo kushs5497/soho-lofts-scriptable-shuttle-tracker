@@ -68,6 +68,7 @@ function mapUI(){
    }catch(_){}
  }
  window.trackTransit=trackTransit;
+ if(telemetrySource==="website")trackTransit("$pageview",{});
  trackTransit("map_open",{version:String(D.version||"unknown")});
  let pathLoadTracking=null;
  if(D.developerMode)document.body.classList.add("developer-mode");
