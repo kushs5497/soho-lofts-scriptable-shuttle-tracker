@@ -15,7 +15,7 @@ html,body,#map,#panel,#panel button,.path-arrival-popup,.path-popup,.vehicle-map
 #tabs button{font-family:inherit!important;font-size:12px;font-weight:500;line-height:1.3}
 #departures{font-size:12px;line-height:1.5}
 #panel>small{display:block;margin-top:7px;font-size:10px;color:#77808f}
-</style></head><body>
+</style><script>window.va=window.va||function(){(window.vaq=window.vaq||[]).push(arguments)};</script><script defer src="/_vercel/insights/script.js"></script></head><body>
 <div id="map"></div><div id="status">Loading map…</div><span id="gps" style="display:none"></span><div id="panel"><div id="panel-heading"><div id="title">SoHo Lofts</div><div id="sync-time">Waiting for GPS…</div></div><div id="tabs"><button data-stop="soho">SoHo</button><button data-stop="hoboken">Hoboken</button><button data-stop="newport">Newport</button></div><div id="departures"></div><small>Shuttle ETA · PATH predictions · web</small></div><span id="shuttle-version" hidden></span>
 <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script><script>
 
@@ -50,6 +50,26 @@ function mapUI(){
  // Station framing reserves top space for logo pins and labels.
  // No HTML markers, external overlays, transforms, root CSS, or WebView changes.
  const D=window.DATA;
+ const telemetryEndpoint=String(D.telemetryEndpoint||"/api/telemetry");
+ const telemetrySource=D.telemetrySource==="scriptable_map"?"scriptable_map":"website";
+ let telemetryId;
+ try{
+   const key="soho_transit_anonymous_id_v1";
+   telemetryId=localStorage.getItem(key);
+   if(!telemetryId){telemetryId="t_"+Math.random().toString(36).slice(2)+Date.now().toString(36);localStorage.setItem(key,telemetryId);}
+ }catch(_){telemetryId="t_"+Math.random().toString(36).slice(2)+Date.now().toString(36);}
+ function trackTransit(event,properties){
+   try{
+     if(typeof fetch!=="function")return;
+     fetch(telemetryEndpoint,{method:"POST",credentials:"omit",mode:"cors",keepalive:true,
+       headers:{"Content-Type":"text/plain;charset=UTF-8"},
+       body:JSON.stringify({event,source:telemetrySource,distinct_id:telemetryId,properties:properties||{}})
+     }).catch(()=>{});
+   }catch(_){}
+ }
+ window.trackTransit=trackTransit;
+ trackTransit("map_open",{version:String(D.version||"unknown")});
+ let pathLoadTracking=null;
  if(D.developerMode)document.body.classList.add("developer-mode");
  document.getElementById("shuttle-version").textContent=String(D.version||"unknown");
  const STYLE_LIGHT="https://tiles.openfreemap.org/styles/positron";
@@ -238,6 +258,7 @@ function mapUI(){
    button.addEventListener("click",()=>{
      if(button.disabled)return;
      expandedPathDestination=expandedPathDestination===id?null:id;
+     if(expandedPathDestination)trackTransit("path_destination_open",{station:String(activePathStation||"unknown"),destination:String(id)});
      updatePathPopup();
    });
    item.appendChild(button);item.appendChild(extra);
@@ -316,6 +337,14 @@ function mapUI(){
      return remain<=35000?"Now":Math.max(1,Math.ceil(remain/60000))+" min";
    };
    const hasFresh=relevant.some(key=>pathSnapshots[key]&&now-pathSnapshots[key].receivedAt<=90000);
+   if(pathLoadTracking&&!pathLoadTracking.recorded&&pathLoadTracking.station===activePathStation){
+     const hasError=relevant.some(key=>pathStates[key]&&pathStates[key].status==="error");
+     if(hasFresh||hasError){
+       pathLoadTracking.recorded=true;
+       trackTransit("path_load",{station:activePathStation,duration_ms:Math.max(0,Date.now()-pathLoadTracking.opened),
+         cache:pathLoadTracking.cached?"cached":"network",status:hasFresh?"success":"error"});
+     }
+   }
    node.querySelectorAll(".path-arrival-item").forEach(item=>{
      const dest=item.dataset.destination;
      const predictions=byDestination[dest]||[];
@@ -374,6 +403,10 @@ function mapUI(){
    activateStation(station);
    activePathStation=station;
    pathPopupOpenedAt=Date.now();
+   const stCode=PATH_BY_ID[station].code;
+   pathLoadTracking={station,opened:Date.now(),recorded:false,
+     cached:["ToNY,"+stCode,"ToNJ,"+stCode].some(key=>pathSnapshots[key]&&Date.now()-pathSnapshots[key].receivedAt<=90000)};
+   trackTransit("path_open",{station});
    const card=document.createElement("div");card.className="path-popup path-popup-compact";
    const header=document.createElement("div");header.className="path-compact-header";
    const logo=document.createElement("img");
@@ -804,13 +837,14 @@ function mapUI(){
        if(!v)return;
        if(vehiclePopup)vehiclePopup.remove();
        selectedVehicleId=v.id;
+       trackTransit("shuttle_open",{shuttle:String(v.number||"unknown")});
        const opened=new maplibregl.Popup({offset:14,maxWidth:"calc(100vw - 24px)",className:"vehicle-map-popup"})
          .setLngLat(f.geometry.coordinates).setHTML(popup(v)).addTo(map);
        vehiclePopup=opened;
        opened.on("close",()=>{if(vehiclePopup===opened){vehiclePopup=null;selectedVehicleId=null;}});
      });
      document.querySelectorAll("#tabs button").forEach(b=>{
-       b.onclick=()=>{selected=b.dataset.stop;refresh();};
+       b.onclick=()=>{selected=b.dataset.stop;trackTransit("shuttle_stop_select",{stop:String(selected)});refresh();};
      });
      // Tap GPS status to inspect an intermittent Scriptable/iOS viewport
      // problem without altering fullscreen sizing or rendered map layers.
@@ -857,7 +891,7 @@ window.DATA={
   soho:SOHO,hob:HOB,npt:NPT,
   logos:[logoData("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"60\" viewBox=\"0 0 60 60\"><rect x=\"2\" y=\"2\" width=\"56\" height=\"56\" rx=\"13\" fill=\"#2463a3\"/><text x=\"30\" y=\"38\" text-anchor=\"middle\" font-family=\"Arial,sans-serif\" font-size=\"17\" font-weight=\"bold\" fill=\"white\">SoHo</text></svg>"),logoData("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"60\" viewBox=\"0 0 60 60\"><circle cx=\"30\" cy=\"30\" r=\"28\" fill=\"#1077a8\"/><text x=\"30\" y=\"36\" text-anchor=\"middle\" font-family=\"Arial,sans-serif\" font-size=\"18\" font-weight=\"bold\" fill=\"white\">PATH</text></svg>")],
   colors:COLORS,events:day.events,sunday:day.dow===0,
-  version:"web",developerMode:false
+  version:"web",developerMode:false,telemetrySource:"website",telemetryEndpoint:"/api/telemetry"
 };
 // Before creating the map, load the real branding assets through the same-origin
 // Vercel API. The map's canvas-based pins and PATH popup reuse these data URIs.
@@ -899,12 +933,15 @@ async function maintainPATH(){
   if(!feed)return;
   const key=feed.expected;
   nextAttempt[key]=Date.now()+45000;
+   const started=Date.now();
   try{
     const params=await fetchJSON(endpoint+"?kind=path&station="+encodeURIComponent(feed.code)+
       "&direction="+encodeURIComponent(feed.direction));
     window.pathInstallStreams([params]);
+     if(window.trackTransit)window.trackTransit("path_api_load",{station:String(feed.code),duration_ms:Date.now()-started,status:"success"});
   }catch(error){
     window.pathStreamFailure(key,error.message);
+     if(window.trackTransit)window.trackTransit("path_api_load",{station:String(feed.code),duration_ms:Date.now()-started,status:"error"});
     console.warn("PATH "+key+": "+error.message);
   }
 }
