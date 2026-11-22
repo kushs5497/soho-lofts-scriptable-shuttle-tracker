@@ -1,7 +1,7 @@
 "use strict";
 // Privacy-conscious, allowlisted PostHog product analytics relay.
 // No credentials, GPS coordinates, IP addresses, or personal profiles are sent.
-const EVENTS=new Set(["map_open","path_open","path_destination_open","path_load","shuttle_open","shuttle_stop_select","widget_refresh","path_api_load","data_error"]);
+const EVENTS=new Set(["$pageview","map_open","path_open","path_destination_open","path_load","shuttle_open","shuttle_stop_select","widget_refresh","path_api_load","data_error"]);
 const FIELDS=new Set(["station","destination","shuttle","stop","version","duration_ms","status","cache","service","error_type"]);
 const SOURCES=new Set(["website","scriptable_map","scriptable_widget"]);
 module.exports=async function handler(req,res){
@@ -17,6 +17,13 @@ module.exports=async function handler(req,res){
   const distinct=String(input.distinct_id||"");
   if(!/^[a-zA-Z0-9_-]{8,80}$/.test(distinct))return res.status(400).json({error:"Invalid anonymous identifier"});
   const props={$lib:"soho-transit-relay",$process_person_profile:false,source:input.source};
+  if(input.event==="$pageview"){
+    if(input.source!=="website")return res.status(400).json({error:"Invalid pageview source"});
+    const requestHost=String(req.headers.host||"").replace(/[^a-zA-Z0-9.:-]/g,"");
+    props.$current_url="https://"+requestHost+"/";
+    props.$pathname="/";
+    props.$host=requestHost;
+  }
   if(input.properties&&typeof input.properties==="object"&&!Array.isArray(input.properties)){
     for(const [key,value] of Object.entries(input.properties)){
       if(!FIELDS.has(key))continue;
