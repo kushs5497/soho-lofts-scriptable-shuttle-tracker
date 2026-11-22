@@ -35,7 +35,7 @@ module.exports=async function handler(req,res){
   try{
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),1800);
     let response;
-    try{response=await fetch(host.replace(/\\/$/,"")+"/capture/",{
+    try{response=await fetch(host.replace(/[/]$/,"")+"/capture/",{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({api_key:key,event:input.event,distinct_id:distinct,properties:props}),signal:controller.signal
     })}finally{clearTimeout(timer)}
