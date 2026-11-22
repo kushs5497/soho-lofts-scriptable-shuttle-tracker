@@ -282,7 +282,8 @@ function mapUI(){
    return null;
  }
  function pathColor(train,dest){
-   const raw=Array.isArray(train.lineColor)?train.lineColor.join(","):String(train.lineColor||"");
+   const input=Array.isArray(train.lineColors)&&train.lineColors.length?train.lineColors:train.lineColor||"";
+   const raw=Array.isArray(input)?input.join(","):String(input);
    const color=raw.toUpperCase().replace(/[^A-F0-9,]/g,"");
    const route=String(train.route||"").toUpperCase();
    const head=String(train.headSign||"").toLowerCase();
@@ -344,8 +345,12 @@ function mapUI(){
        const arrival=updated+secs*1000;
        if(arrival<now-30000||arrival>now+7200000)continue;
        latest=Math.max(latest,updated);
-       if(!byDestination[dest])byDestination[dest]=[];
-       byDestination[dest].push({arrival,color:pathColor(train,dest)});
+       const color=pathColor(train,dest);
+       // A headsign is not a unique route: 33rd Street can have blue and yellow trains.
+       // Preserve route identity for non-preset stations, including via-Hoboken service.
+       const id=PATH_ROWS[activePathStation]?dest:dest+"|"+(color||"unknown");
+       if(!byDestination[id])byDestination[id]=[];
+       byDestination[id].push({arrival,color});
      }
    }
    // Predictions may repeat across a station's two direction streams.
@@ -367,8 +372,7 @@ function mapUI(){
      if(holder){
        const arrivals=Object.entries(closest).sort((a,b)=>a[1].arrival-b[1].arrival);
        if(!arrivals.length){
-         holder.querySelectorAll(".path-arrival-item").forEach(item=>item.remove());
-         if(!holder.querySelector(".path-empty-row")){
+         if(!holder.querySelector(".path-arrival-item")&&!holder.querySelector(".path-empty-row")){
            const empty=document.createElement("div");empty.className="path-empty-row";
            const spinner=document.createElement("span");spinner.className="path-spinner";
            spinner.setAttribute("role","status");
@@ -380,12 +384,13 @@ function mapUI(){
          const destinations={NWK:"Newark",HAR:"Harrison",JSQ:"Journal Square",
                             WTC:"World Trade Center",HOB:"Hoboken","33S":"33rd Street"};
          const existing=[...holder.querySelectorAll(".path-arrival-item")];
-         const wanted=new Set(arrivals.map(([dest])=>dest));
-         for(const item of existing)if(!wanted.has(item.dataset.destination))item.remove();
-         for(let i=0;i<arrivals.length;i++){
-           const dest=arrivals[i][0];
-           let item=existing.find(row=>row.dataset.destination===dest);
-           if(!item)item=createPathArrivalRow(dest,destinations[dest]||dest,closest[dest].color);
+         const liveIds=arrivals.map(([id])=>id);
+         // Keep discovered route rows (with a dash) during brief missed updates.
+         const ordered=[...liveIds,...existing.map(row=>row.dataset.destination).filter(id=>!liveIds.includes(id))];
+         for(let i=0;i<ordered.length;i++){
+           const id=ordered[i],dest=id.split("|")[0],live=closest[id];
+           let item=existing.find(row=>row.dataset.destination===id);
+           if(!item)item=createPathArrivalRow(id,destinations[dest]||dest,live?.color||"yellow");
            if(holder.children[i]!==item)holder.insertBefore(item,holder.children[i]||null);
          }
        }
